@@ -1,0 +1,6 @@
+*.d
+*.o
+myapp
+*.user
+_bin/
+build/
