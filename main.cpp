@@ -1,99 +1,15 @@
 
-#include <stdio.h>
-#include "main.h"
-#include <string>
-
-#ifdef _WIN32
-#include <windows.h>
-#include <winpty.h>
-#else
-#include <unistd.h>
-#include <sys/wait.h>
-#include <pty.h>
+#ifndef _WIN32
+#error This code is for Windows only.
 #endif
 
-#ifndef _WIN32
-std::string exec_git_posix()
-{
-	std::string ret;
+#include <windows.h>
+#include <cstdio>
+#include <string>
+#include <string_view>
+#include <thread>
 
-	int pipefd[2];
-	if (pipe(pipefd) == -1) {
-		return ret;
-	}
-
-	pid_t pid = fork();
-	if (pid == -1) {
-		close(pipefd[0]);
-		close(pipefd[1]);
-		return ret;
-	}
-
-	if (pid == 0) {
-		// child
-		close(pipefd[0]);
-		dup2(pipefd[1], STDOUT_FILENO);
-		close(pipefd[1]);
-
-		char *args[] = { (char *)"git", (char *)"--version", nullptr };
-		execvp("git", args);
-		_exit(1);
-	}
-
-	// parent
-	close(pipefd[1]);
-
-	char buf[256];
-	ssize_t n;
-	while ((n = read(pipefd[0], buf, sizeof(buf))) > 0) {
-		ret.append(buf, n);
-	}
-	close(pipefd[0]);
-
-	waitpid(pid, nullptr, 0);
-
-	while (!ret.empty() && (ret.back() == '\n' || ret.back() == '\r')) {
-		ret.pop_back();
-	}
-
-	return ret;
-}
-
-std::string exec_git_posixpty()
-{
-	std::string ret;
-
-	int master_fd;
-	pid_t pid = forkpty(&master_fd, nullptr, nullptr, nullptr);
-	if (pid == -1) {
-		return ret;
-	}
-
-	if (pid == 0) {
-		// child
-		char *args[] = { (char *)"git", (char *)"--version", nullptr };
-		execvp("git", args);
-		_exit(1);
-	}
-
-	// parent
-	char buf[256];
-	ssize_t n;
-	while ((n = read(master_fd, buf, sizeof(buf))) > 0) {
-		ret.append(buf, n);
-	}
-	close(master_fd);
-
-	waitpid(pid, nullptr, 0);
-
-	while (!ret.empty() && (ret.back() == '\n' || ret.back() == '\r')) {
-		ret.pop_back();
-	}
-
-	return ret;
-}
-
-#else
+namespace misc {
 
 std::wstring convert_str_to_wstr(std::string const &str)
 {
@@ -107,183 +23,262 @@ std::wstring convert_str_to_wstr(std::string const &str)
 	return wstr;
 }
 
-std::string exec_git_win()
+std::string convert_wstr_to_str(std::wstring const &wstr)
 {
-	std::string ret;
-
-	HANDLE hReadPipe = nullptr;
-	HANDLE hWritePipe = nullptr;
-	SECURITY_ATTRIBUTES sa = {};
-	sa.nLength = sizeof(sa);
-	sa.bInheritHandle = TRUE;
-	if (!CreatePipe(&hReadPipe, &hWritePipe, &sa, 0)) {
-		return ret;
+	std::string str;
+	if (wstr.empty()) return str;
+	int len = WideCharToMultiByte(CP_UTF8, 0, wstr.c_str(), static_cast<int>(wstr.size()),
+								nullptr, 0, nullptr, nullptr);
+	if (len > 0) {
+		str.resize(len);
+		WideCharToMultiByte(CP_UTF8, 0, wstr.c_str(), static_cast<int>(wstr.size()),
+							&str[0], len, nullptr, nullptr);
 	}
-	SetHandleInformation(hReadPipe, HANDLE_FLAG_INHERIT, 0);
-
-	STARTUPINFOW si = {};
-	si.cb = sizeof(si);
-	si.dwFlags = STARTF_USESTDHANDLES;
-	si.hStdOutput = hWritePipe;
-	si.hStdError = hWritePipe;
-
-	PROCESS_INFORMATION pi = {};
-	wchar_t cmd[] = L"git --version";
-	BOOL ok = CreateProcessW(
-		nullptr, cmd,
-		nullptr, nullptr,
-		TRUE, 0,
-		nullptr, nullptr,
-		&si, &pi
-	);
-	CloseHandle(hWritePipe);
-
-	if (!ok) {
-		CloseHandle(hReadPipe);
-		return ret;
-	}
-
-	char buf[256];
-	DWORD n;
-	while (ReadFile(hReadPipe, buf, sizeof(buf), &n, nullptr) && n > 0) {
-		ret.append(buf, n);
-	}
-	CloseHandle(hReadPipe);
-
-	WaitForSingleObject(pi.hProcess, INFINITE);
-	CloseHandle(pi.hProcess);
-	CloseHandle(pi.hThread);
-
-	while (!ret.empty() && (ret.back() == '\n' || ret.back() == '\r')) {
-		ret.pop_back();
-	}
-
-	return ret;
+	return str;
 }
 
-std::string exec_git_winpty()
+std::string find_windows_openssh()
 {
-	std::string ret;
-	winpty_error_ptr_t err = nullptr;
+	wchar_t system_dir[MAX_PATH];
+	UINT len = GetSystemDirectoryW(system_dir, ARRAYSIZE(system_dir));
+	if (len == 0 || len >= ARRAYSIZE(system_dir)) return {};
 
-	winpty_config_t *cfg = winpty_config_new(WINPTY_FLAG_PLAIN_OUTPUT, &err);
-	if (!cfg) {
-		winpty_error_free(err);
-		return ret;
+	std::wstring path(system_dir, len);
+	path += L"\\OpenSSH\\ssh.exe";
+	DWORD attributes = GetFileAttributesW(path.c_str());
+	if (attributes == INVALID_FILE_ATTRIBUTES || (attributes & FILE_ATTRIBUTE_DIRECTORY)) return {};
+
+	std::string result = convert_wstr_to_str(path);
+	for (char &c : result) {
+		if (c == '\\') c = '/';
 	}
-
-	winpty_t *wp = winpty_open(cfg, &err);
-	winpty_config_free(cfg);
-	if (!wp) {
-		winpty_error_free(err);
-		return ret;
-	}
-
-	winpty_spawn_config_t *scfg = winpty_spawn_config_new(
-		WINPTY_SPAWN_FLAG_AUTO_SHUTDOWN,
-		nullptr,
-		L"git --version",
-		nullptr,
-		nullptr,
-		&err
-	);
-	if (!scfg) {
-		winpty_error_free(err);
-		winpty_free(wp);
-		return ret;
-	}
-
-	HANDLE hProcess = nullptr;
-	DWORD createError = 0;
-	BOOL ok = winpty_spawn(wp, scfg, &hProcess, nullptr, &createError, &err);
-	winpty_spawn_config_free(scfg);
-	if (!ok) {
-		winpty_error_free(err);
-		winpty_free(wp);
-		return ret;
-	}
-
-	HANDLE hConout = CreateFileW(
-		winpty_conout_name(wp),
-		GENERIC_READ, 0, nullptr,
-		OPEN_EXISTING, 0, nullptr
-	);
-
-	if (hConout != INVALID_HANDLE_VALUE) {
-		char buf[256];
-		DWORD n;
-		while (ReadFile(hConout, buf, sizeof(buf), &n, nullptr) && n > 0) {
-			ret.append(buf, n);
-		}
-		CloseHandle(hConout);
-	}
-
-	WaitForSingleObject(hProcess, INFINITE);
-	CloseHandle(hProcess);
-	winpty_free(wp);
-
-	while (!ret.empty() && (ret.back() == '\n' || ret.back() == '\r')) {
-		ret.pop_back();
-	}
-	return ret;
+	return result;
 }
 
-static std::string strip_vt(const std::string &s)
-{
-	std::string out;
-	size_t i = 0;
-	while (i < s.size()) {
-		if ((unsigned char)s[i] == 0x1b) {
-			i++;
-			if (i < s.size() && s[i] == '[') {
-				// CSI sequence: ESC [ {param bytes} {final byte}
-				i++;
-				while (i < s.size() && (unsigned char)s[i] >= 0x20 && (unsigned char)s[i] <= 0x3f) i++;
-				if (i < s.size() && (unsigned char)s[i] >= 0x40 && (unsigned char)s[i] <= 0x7e) i++;
-			} else if (i < s.size() && s[i] == ']') {
-				// OSC sequence: ESC ] {string} BEL  or  ESC ] {string} ESC '\'
-				i++;
-				while (i < s.size()) {
-					if ((unsigned char)s[i] == 0x07) { i++; break; } // BEL
-					if ((unsigned char)s[i] == 0x1b && i + 1 < s.size() && s[i + 1] == '\\') { i += 2; break; } // ST
-					i++;
+class VtStripper {
+public:
+	void append(std::string_view input, std::string &output)
+	{
+		for (unsigned char c : input) {
+			switch (state_) {
+			case State::Text:
+				if (c == 0x1b) {
+					state_ = State::Escape;
+				} else {
+					output.push_back(static_cast<char>(c));
 				}
-			} else if (i < s.size()) {
-				i++; // 2-char ESC sequence
+				break;
+
+			case State::Escape:
+				if (c == '[') {
+					state_ = State::Csi;
+				} else if (c == ']') {
+					state_ = State::Osc;
+				} else if (c == 'P' || c == 'X' || c == '^' || c == '_') {
+					state_ = State::String;
+				} else if (c >= 0x20 && c <= 0x2f) {
+					state_ = State::EscapeIntermediate;
+				} else if (c == 0x1b) {
+					state_ = State::Escape;
+				} else {
+					state_ = State::Text;
+				}
+				break;
+
+			case State::EscapeIntermediate:
+				if (c >= 0x30 && c <= 0x7e) {
+					state_ = State::Text;
+				} else if (c == 0x1b) {
+					state_ = State::Escape;
+				}
+				break;
+
+			case State::Csi:
+				if (c >= 0x40 && c <= 0x7e) {
+					state_ = State::Text;
+				} else if (c == 0x1b) {
+					state_ = State::Escape;
+				}
+				break;
+
+			case State::Osc:
+				if (c == 0x07) {
+					state_ = State::Text;
+				} else if (c == 0x1b) {
+					state_ = State::OscEscape;
+				}
+				break;
+
+			case State::OscEscape:
+				if (c == '\\') {
+					state_ = State::Text;
+				} else if (c != 0x1b) {
+					state_ = State::Osc;
+				}
+				break;
+
+			case State::String:
+				if (c == 0x1b) {
+					state_ = State::StringEscape;
+				}
+				break;
+
+			case State::StringEscape:
+				if (c == '\\') {
+					state_ = State::Text;
+				} else if (c != 0x1b) {
+					state_ = State::String;
+				}
+				break;
+			}
+		}
+	}
+
+private:
+	enum class State {
+		Text,
+		Escape,
+		EscapeIntermediate,
+		Csi,
+		Osc,
+		OscEscape,
+		String,
+		StringEscape,
+	};
+
+	State state_ = State::Text;
+};
+
+}
+
+struct ExecResult {
+	bool started = false;
+	DWORD exit_code = static_cast<DWORD>(-1);
+	DWORD error_code = ERROR_SUCCESS;
+	std::string raw_output;
+	std::string text_output;
+};
+
+bool write_all(HANDLE handle, char const *data, size_t size)
+{
+	while (size > 0) {
+		DWORD written = 0;
+		DWORD chunk = size > MAXDWORD ? MAXDWORD : static_cast<DWORD>(size);
+		if (!WriteFile(handle, data, chunk, &written, nullptr) || written == 0) {
+			return false;
+		}
+		data += written;
+		size -= written;
+	}
+	return true;
+}
+
+void wait_process_with_input(HANDLE process, HANDLE &conpty_input)
+{
+	HANDLE parent_input = GetStdHandle(STD_INPUT_HANDLE);
+	if (!parent_input || parent_input == INVALID_HANDLE_VALUE) {
+		WaitForSingleObject(process, INFINITE);
+		return;
+	}
+
+	DWORD console_mode = 0;
+	bool const parent_is_console = GetConsoleMode(parent_input, &console_mode) != FALSE;
+	HANDLE handles[] = {process, parent_input};
+
+	for (;;) {
+		DWORD wait_result = WaitForMultipleObjects(2, handles, FALSE, INFINITE);
+		if (wait_result == WAIT_OBJECT_0) {
+			return;
+		}
+		if (wait_result != WAIT_OBJECT_0 + 1) {
+			break;
+		}
+
+		std::string input;
+		if (parent_is_console) {
+			INPUT_RECORD records[32];
+			DWORD count = 0;
+			if (!ReadConsoleInputW(parent_input, records, ARRAYSIZE(records), &count)) {
+				break;
+			}
+
+			for (DWORD i = 0; i < count; i++) {
+				if (records[i].EventType != KEY_EVENT) {
+					continue;
+				}
+				KEY_EVENT_RECORD const &key = records[i].Event.KeyEvent;
+				if (!key.bKeyDown || key.uChar.UnicodeChar == 0) {
+					continue;
+				}
+
+				char utf8[4];
+				int length = WideCharToMultiByte(CP_UTF8, 0, &key.uChar.UnicodeChar, 1,
+										  utf8, sizeof(utf8), nullptr, nullptr);
+				for (WORD repeat = 0; repeat < key.wRepeatCount && length > 0; repeat++) {
+					input.append(utf8, length);
+				}
 			}
 		} else {
-			out += s[i++];
+			char buf[256];
+			DWORD count = 0;
+			if (!ReadFile(parent_input, buf, sizeof(buf), &count, nullptr) || count == 0) {
+				break;
+			}
+			input.assign(buf, count);
+		}
+
+		if (!input.empty() && !write_all(conpty_input, input.data(), input.size())) {
+			break;
 		}
 	}
-	return out;
+
+	// 親側の入力がEOFでも、ConPTYの入力パイプは子プロセス終了まで保持する。
+	// ここで閉じると、入力を必要としないコマンドまで途中で終了してしまう。
+	WaitForSingleObject(process, INFINITE);
 }
 
-std::string exec_git_conpty()
+ExecResult exec_git_conpty(std::string const &cmd)
 {
-	std::string ret;
+	// setup for experimentation
+	ExecResult result;
 
-	HANDLE hPipeInRead = nullptr, hPipeInWrite = nullptr;
-	HANDLE hPipeOutRead = nullptr, hPipeOutWrite = nullptr;
+	misc::VtStripper vt_stripper;
+
+	auto writeOutput = [&](char const *buf, size_t len){
+		fwrite(buf, 1, len, stdout);
+		fflush(stdout);
+		result.text_output.append(buf, len);
+	};
+
+	//
+
+	HANDLE hPipeInRead = nullptr;
+	HANDLE hPipeInWrite = nullptr;
+	HANDLE hPipeOutRead = nullptr;
+	HANDLE hPipeOutWrite = nullptr;
 
 	if (!CreatePipe(&hPipeInRead, &hPipeInWrite, nullptr, 0)) {
-		return ret;
+		result.error_code = GetLastError();
+		return result;
 	}
 	if (!CreatePipe(&hPipeOutRead, &hPipeOutWrite, nullptr, 0)) {
+		result.error_code = GetLastError();
 		CloseHandle(hPipeInRead);
 		CloseHandle(hPipeInWrite);
-		return ret;
+		return result;
 	}
 
 	HPCON hPC = nullptr;
 	COORD size = {80, 25};
 	HRESULT hr = CreatePseudoConsole(size, hPipeInRead, hPipeOutWrite, 0, &hPC);
-	// ConPTY が両端を引き継ぐので呼び出し側のコピーを閉じる
-	CloseHandle(hPipeInRead);
-	CloseHandle(hPipeOutWrite);
+	// ConPTY に接続する子プロセスを作成するまで、パイプ端は保持する。
 	if (FAILED(hr)) {
+		result.error_code = static_cast<DWORD>(hr);
+		CloseHandle(hPipeInRead);
 		CloseHandle(hPipeInWrite);
 		CloseHandle(hPipeOutRead);
-		return ret;
+		CloseHandle(hPipeOutWrite);
+		return result;
 	}
 
 	SIZE_T attrSize = 0;
@@ -295,47 +290,84 @@ std::string exec_git_conpty()
 	if (!siEx.lpAttributeList
 			|| !InitializeProcThreadAttributeList(siEx.lpAttributeList, 1, 0, &attrSize)
 			|| !UpdateProcThreadAttribute(siEx.lpAttributeList, 0, PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, hPC, sizeof(hPC), nullptr, nullptr)) {
+		result.error_code = siEx.lpAttributeList ? GetLastError() : ERROR_NOT_ENOUGH_MEMORY;
 		if (siEx.lpAttributeList) HeapFree(GetProcessHeap(), 0, siEx.lpAttributeList);
+		CloseHandle(hPipeInRead);
 		CloseHandle(hPipeInWrite);
 		CloseHandle(hPipeOutRead);
+		CloseHandle(hPipeOutWrite);
 		ClosePseudoConsole(hPC);
-		return ret;
+		return result;
 	}
 
-	wchar_t wcmd[] = L"git --version";
+	std::wstring wcmd = misc::convert_str_to_wstr(cmd);
+
 	PROCESS_INFORMATION pi = {};
-	BOOL ok = CreateProcessW(nullptr, wcmd, nullptr, nullptr, FALSE, EXTENDED_STARTUPINFO_PRESENT, nullptr, nullptr, &siEx.StartupInfo, &pi);
+	BOOL ok = CreateProcessW(nullptr,
+							 wcmd.data(),
+							 nullptr,
+							 nullptr,
+							 FALSE,
+							 CREATE_SUSPENDED | EXTENDED_STARTUPINFO_PRESENT,
+							 nullptr,
+							 nullptr,
+							 &siEx.StartupInfo,
+							 &pi);
+	if (!ok) {
+		result.error_code = GetLastError();
+	}
 
 	DeleteProcThreadAttributeList(siEx.lpAttributeList);
 	HeapFree(GetProcessHeap(), 0, siEx.lpAttributeList);
-	CloseHandle(hPipeInWrite);
+
+	// CreateProcessW が完了するまで、CreatePseudoConsole に渡したパイプ端を保持する。
+	CloseHandle(hPipeInRead);
+	CloseHandle(hPipeOutWrite);
 
 	if (!ok) {
+		CloseHandle(hPipeInWrite);
+		hPipeInWrite = nullptr;
 		CloseHandle(hPipeOutRead);
 		ClosePseudoConsole(hPC);
-		return ret;
+		return result;
 	}
+	result.started = true;
+
+	// ConPTY の出力はプロセスの実行中から継続して排出する必要がある。
+	std::thread output_reader([&]{
+		char buf[256];
+		DWORD n;
+		while (ReadFile(hPipeOutRead, buf, sizeof(buf), &n, nullptr) && n > 0) {
+			result.raw_output.append(buf, n);
+			std::string text;
+			vt_stripper.append({buf, n}, text);
+			if (!text.empty()) {
+				writeOutput(text.data(), text.size());
+			}
+		}
+	});
+
+	ResumeThread(pi.hThread);
 
 	// プロセス終了後に ClosePseudoConsole することで hPipeOutRead が EOF になる
-	WaitForSingleObject(pi.hProcess, INFINITE);
+	wait_process_with_input(pi.hProcess, hPipeInWrite);
+	GetExitCodeProcess(pi.hProcess, &result.exit_code);
 	CloseHandle(pi.hProcess);
 	CloseHandle(pi.hThread);
+	// 入力しない場合でも、ここまでは書き込み端を保持する。
+	// 先に閉じると ConPTY が入力チャネルの終了として扱い、子プロセスも終了する。
+	if (hPipeInWrite) {
+		CloseHandle(hPipeInWrite);
+		hPipeInWrite = nullptr;
+	}
+
+	// ClosePseudoConsole が生成する最終出力も、読み取りスレッドで受け取る。
 	ClosePseudoConsole(hPC);
 
-	char buf[256];
-	DWORD n;
-	while (ReadFile(hPipeOutRead, buf, sizeof(buf), &n, nullptr) && n > 0) {
-		ret.append(buf, n);
-	}
+	output_reader.join();
 	CloseHandle(hPipeOutRead);
 
-	ret = strip_vt(ret);
-
-	while (!ret.empty() && (ret.back() == '\n' || ret.back() == '\r')) {
-		ret.pop_back();
-	}
-
-	return ret;
+	return result;
 }
 
 bool is_conpty_available()
@@ -345,12 +377,30 @@ bool is_conpty_available()
 	return GetProcAddress(hKernel32, "CreatePseudoConsole") != nullptr;
 }
 
-#endif
-
-int main(int argc, char **argv)
+int main()
 {
-	std::string s = exec_git_conpty();
-	printf("%s\n", s.c_str());
-	return 0;
+	if (!is_conpty_available()) {
+		fprintf(stderr, "ConPTY is not available on this system.\n");
+		return 1;
+	}
+
+	// std::string gitcmd = "--version";
+	std::string gitcmd = "fetch";
+	// Git同梱のMSYS版sshは、Gitが標準入出力をパイプ化するとConPTYを
+	// 確認入力用TTYとして再取得できないため、Win32 OpenSSHを明示する。
+	std::string ssh = misc::find_windows_openssh();
+	if (ssh.empty()) {
+		fprintf(stderr, "Windows OpenSSH client was not found.\n");
+		return 1;
+	}
+	std::string cmd = "git -c core.sshCommand=\"" + ssh + "\" " + gitcmd;
+
+	ExecResult result = exec_git_conpty(cmd);
+	if (!result.started) {
+		fprintf(stderr, "Failed to start process (error %lu).\n", result.error_code);
+		return 128;
+	}
+
+	return result.exit_code == 0 ? 0 : 128;
 }
 

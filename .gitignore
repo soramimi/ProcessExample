@@ -4,3 +4,4 @@ myapp
 *.user
 _bin/
 build/
+.vs/
