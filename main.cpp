@@ -5,7 +5,10 @@
 
 #include <windows.h>
 #include <assert.h>
+#include <atomic>
+#include <condition_variable>
 #include <cstdio>
+#include <mutex>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -60,6 +63,7 @@ std::string find_windows_openssh()
 	return result;
 }
 
+// ReadFileの境界をまたぐVTシーケンスも除去できるよう、解析状態を保持する。
 class VtStripper {
 public:
 	std::string append(std::string_view input)
@@ -162,6 +166,7 @@ private:
 
 bool write_all(HANDLE handle, char const *data, size_t size)
 {
+	// 匿名パイプへのWriteFileは要求サイズ未満で成功する場合があるため、全量を書き切る。
 	while (size > 0) {
 		DWORD written = 0;
 		DWORD chunk = size > MAXDWORD ? MAXDWORD : static_cast<DWORD>(size);
@@ -176,71 +181,154 @@ bool write_all(HANDLE handle, char const *data, size_t size)
 
 //
 
+// 監督プロセスからConPTYワーカーを起動する。
+// hInputWrite_ -> ワーカーstdin、ワーカーstdout/stderr -> hOutputRead_ の双方向構成。
 class WinProcess {
 private:
-	bool use_input_ = false;
-	HANDLE hWritePipe_ = nullptr;
+	HANDLE hInputWrite_ = nullptr;
+	HANDLE hOutputRead_ = nullptr;
+	PROCESS_INFORMATION pi_ = {};
+	std::thread output_reader_;
+	std::mutex output_mutex_;
+	std::condition_variable output_changed_;
+	std::string output_;
+	bool output_closed_ = false;
 public:
+	~WinProcess()
+	{
+		close_input();
+		wait();
+	}
+
 	bool exec(std::string const &cmd)
 	{
-		HANDLE hReadPipe = nullptr;
+		if (IS_VALID_HANDLE(pi_.hProcess) || IS_VALID_HANDLE(pi_.hThread)) {
+			return false;
+		}
+		{
+			std::lock_guard<std::mutex> lock(output_mutex_);
+			output_.clear();
+			output_closed_ = false;
+		}
+
+		// 子へ渡す端だけを継承可能にし、親が保持する端は継承させない。
+		// 不要な継承端が残ると、反対側でEOFを検出できなくなる。
+		HANDLE hInputRead = nullptr;
+		HANDLE hOutputWrite = nullptr;
 		SECURITY_ATTRIBUTES sa = {};
 		sa.nLength = sizeof(sa);
 		sa.bInheritHandle = TRUE;
-		if (!CreatePipe(&hReadPipe, &hWritePipe_, &sa, 0)) {
+
+		if (!CreatePipe(&hInputRead, &hInputWrite_, &sa, 0)) {
 			return false;
 		}
-		SetHandleInformation(hReadPipe, HANDLE_FLAG_INHERIT, 0);
+		if (!CreatePipe(&hOutputRead_, &hOutputWrite, &sa, 0)) {
+			CloseHandle(hInputRead);
+			close_input();
+			return false;
+		}
+		SetHandleInformation(hInputWrite_, HANDLE_FLAG_INHERIT, 0);
+		SetHandleInformation(hOutputRead_, HANDLE_FLAG_INHERIT, 0);
 
 		STARTUPINFOW si = {};
 		si.cb = sizeof(si);
 		si.dwFlags = STARTF_USESTDHANDLES;
-		si.hStdOutput = hWritePipe_;
-		si.hStdError = hWritePipe_;
+		si.hStdInput = hInputRead;
+		si.hStdOutput = hOutputWrite;
+		si.hStdError = hOutputWrite;
 
-		PROCESS_INFORMATION pi = {};
 		std::wstring wcmd = misc::convert_str_to_wstr(cmd);
 		BOOL ok = CreateProcessW(
 					nullptr, wcmd.data(),
 					nullptr, nullptr,
 					TRUE, 0,
 					nullptr, nullptr,
-					&si, &pi
+					&si, &pi_
 					);
 
-		if (!use_input_) {
-			close_input();
-		}
+		CloseHandle(hInputRead);
+		CloseHandle(hOutputWrite);
 
 		if (!ok) {
-			CloseHandle(hReadPipe);
+			close_input();
+			CloseHandle(hOutputRead_);
+			hOutputRead_ = nullptr;
+			pi_ = {};
 			return false;
 		}
 
 		HANDLE hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE);
-
-		char buf[256];
-		DWORD n;
-		while (ReadFile(hReadPipe, buf, sizeof(buf), &n, nullptr) && n > 0) {
-			WriteFile(hStdOutput, buf, n, &n, nullptr);
-		}
-		CloseHandle(hReadPipe);
-
-		WaitForSingleObject(pi.hProcess, INFINITE);
-		CloseHandle(pi.hProcess);
-		CloseHandle(pi.hThread);
+		// ワーカー出力を実行中から排出する。蓄積した文字列はプロンプト検出にも使い、
+		// 同じデータを監督プロセスのstdoutへ逐次中継する。
+		output_reader_ = std::thread([this, hStdOutput]{
+			char buf[256];
+			DWORD n;
+			while (ReadFile(hOutputRead_, buf, sizeof(buf), &n, nullptr) && n > 0) {
+				{
+					std::lock_guard<std::mutex> lock(output_mutex_);
+					output_.append(buf, n);
+				}
+				output_changed_.notify_all();
+				DWORD written = 0;
+				WriteFile(hStdOutput, buf, n, &written, nullptr);
+			}
+			{
+				std::lock_guard<std::mutex> lock(output_mutex_);
+				output_closed_ = true;
+			}
+			output_changed_.notify_all();
+		});
 
 		return true;
 	}
+
+	bool wait()
+	{
+		close_input();
+
+		bool started = IS_VALID_HANDLE(pi_.hProcess);
+		if (IS_VALID_HANDLE(pi_.hProcess)) {
+			WaitForSingleObject(pi_.hProcess, INFINITE);
+			CloseHandle(pi_.hProcess);
+		}
+		if (IS_VALID_HANDLE(pi_.hThread)) {
+			CloseHandle(pi_.hThread);
+		}
+		pi_ = {};
+
+		if (output_reader_.joinable()) {
+			output_reader_.join();
+		}
+		if (IS_VALID_HANDLE(hOutputRead_)) {
+			CloseHandle(hOutputRead_);
+			hOutputRead_ = nullptr;
+		}
+		return started;
+	}
+
+	bool wait_for_output(std::string const &text)
+	{
+		// プロンプトが複数回のReadFileに分割されても、連結済みoutput_から検索できる。
+		// ワーカーが先に終了した場合はoutput_closed_で待機を解除する。
+		std::unique_lock<std::mutex> lock(output_mutex_);
+		output_changed_.wait(lock, [&]{
+			return output_.find(text) != std::string::npos || output_closed_;
+		});
+		return output_.find(text) != std::string::npos;
+	}
+
 	void close_input()
 	{
-		CloseHandle(hWritePipe_);
-		hWritePipe_ = nullptr;
+		if (IS_VALID_HANDLE(hInputWrite_)) {
+			CloseHandle(hInputWrite_);
+			hInputWrite_ = nullptr;
+		}
 	}
+
 	bool write_input(char const *ptr, size_t n)
 	{
-		if (hWritePipe_ != nullptr) {
-			if (write_all(hWritePipe_, ptr, static_cast<DWORD>(n))) {
+		if (IS_VALID_HANDLE(hInputWrite_)) {
+			if (write_all(hInputWrite_, ptr, n)) {
 				return true;
 			}
 		}
@@ -254,73 +342,9 @@ struct ExecResult {
 	bool started = false;
 	DWORD exit_code = static_cast<DWORD>(-1);
 	DWORD error_code = ERROR_SUCCESS;
-	// std::string raw_output;
-	// std::string text_output;
 };
 
-void wait_process_with_input(HANDLE process, HANDLE &conpty_input)
-{
-	HANDLE parent_input = GetStdHandle(STD_INPUT_HANDLE);
-	if (!IS_VALID_HANDLE(parent_input)) {
-		WaitForSingleObject(process, INFINITE);
-		return;
-	}
-
-	DWORD console_mode = 0;
-	bool const parent_is_console = GetConsoleMode(parent_input, &console_mode) != FALSE;
-	HANDLE handles[] = {process, parent_input};
-
-	for (;;) {
-		DWORD wait_result = WaitForMultipleObjects(2, handles, FALSE, INFINITE);
-		if (wait_result == WAIT_OBJECT_0) {
-			return;
-		}
-		if (wait_result != WAIT_OBJECT_0 + 1) {
-			break;
-		}
-
-		std::string input;
-		if (parent_is_console) {
-			INPUT_RECORD records[32];
-			DWORD count = 0;
-			if (!ReadConsoleInputW(parent_input, records, ARRAYSIZE(records), &count)) {
-				break;
-			}
-
-			for (DWORD i = 0; i < count; i++) {
-				if (records[i].EventType != KEY_EVENT) {
-					continue;
-				}
-				KEY_EVENT_RECORD const &key = records[i].Event.KeyEvent;
-				if (!key.bKeyDown || key.uChar.UnicodeChar == 0) {
-					continue;
-				}
-
-				char utf8[4];
-				int length = WideCharToMultiByte(CP_UTF8, 0, &key.uChar.UnicodeChar, 1, utf8, sizeof(utf8), nullptr, nullptr);
-				for (WORD repeat = 0; repeat < key.wRepeatCount && length > 0; repeat++) {
-					input.append(utf8, length);
-				}
-			}
-		} else {
-			char buf[256];
-			DWORD count = 0;
-			if (!ReadFile(parent_input, buf, sizeof(buf), &count, nullptr) || count == 0) {
-				break;
-			}
-			input.assign(buf, count);
-		}
-
-		if (!input.empty() && !write_all(conpty_input, input.data(), input.size())) {
-			break;
-		}
-	}
-
-	// 親側の入力がEOFでも、ConPTYの入力パイプは子プロセス終了まで保持する。
-	// ここで閉じると、入力を必要としないコマンドまで途中で終了してしまう。
-	WaitForSingleObject(process, INFINITE);
-}
-
+// ワーカープロセス内でConPTYを所有し、標準入出力とConPTYのパイプを中継する。
 class WinConPTY {
 private:
 	ExecResult result_;
@@ -331,6 +355,7 @@ private:
 	HANDLE hPipeInWrite_ = nullptr;
 	HANDLE hPipeOutRead_ = nullptr;
 	HANDLE hPipeOutWrite_ = nullptr;
+	std::atomic<bool> stop_input_{false};
 	std::thread input_writer_;
 	std::thread output_reader_;
 public:
@@ -344,8 +369,7 @@ public:
 
 	bool exec(std::string const &cmd)
 	{
-		misc::VtStripper vt_stripper;
-
+		// ConPTYから見た入力用と出力用の2本の匿名パイプを用意する。
 		if (!CreatePipe(&hPipeInRead_, &hPipeInWrite_, nullptr, 0)) {
 			result_.error_code = GetLastError();
 			return false;
@@ -424,11 +448,28 @@ public:
 		HANDLE hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE);
 		HANDLE hStdInput = GetStdHandle(STD_INPUT_HANDLE);
 
-		input_writer_ = std::thread([&]{
+		// ワーカーstdinは監督プロセスが作った匿名パイプである。
+		// PeekNamedPipeでデータの有無を確認してから読むことでReadFileの永久待機を避け、
+		// Git終了後にstop_input_でこのスレッドを確実に停止できるようにする。
+		stop_input_ = false;
+		input_writer_ = std::thread([this, hStdInput]{
 			if (IS_VALID_HANDLE(hPipeInWrite_) && IS_VALID_HANDLE(hStdInput)) {
 				char buf[256];
-				DWORD n;
-				while (ReadFile(hStdInput, buf, sizeof(buf), &n, nullptr) && n > 0) {
+				while (!stop_input_) {
+					DWORD available = 0;
+					if (!PeekNamedPipe(hStdInput, nullptr, 0, nullptr, &available, nullptr)) {
+						break;
+					}
+					if (available == 0) {
+						Sleep(10);
+						continue;
+					}
+
+					DWORD n = 0;
+					DWORD size = available < sizeof(buf) ? available : sizeof(buf);
+					if (!ReadFile(hStdInput, buf, size, &n, nullptr) || n == 0) {
+						break;
+					}
 					if (!write_all(hPipeInWrite_, buf, n)) {
 						break;
 					}
@@ -436,8 +477,9 @@ public:
 			}
 		});
 
-		// ConPTY の出力はプロセスの実行中から継続して排出する必要がある。
-		output_reader_ = std::thread([&]{
+		// ConPTYの出力はプロセスの実行中から継続して排出する必要がある。
+		// VtStripperはスレッド内に値で保持し、ReadFile間で解析状態を維持する。
+		output_reader_ = std::thread([this, hStdOutput, vt_stripper = misc::VtStripper{}]() mutable {
 			char buf[256];
 			DWORD n;
 			while (ReadFile(hPipeOutRead_, buf, sizeof(buf), &n, nullptr) && n > 0) {
@@ -448,29 +490,21 @@ public:
 
 		ResumeThread(pi_.hThread);
 
-		// debug input
-		{
-			if (IS_VALID_HANDLE(hPipeInWrite_)) {
-				Sleep(1000);
-				std::string send = "no\n";
-				write_input(send.c_str(), send.size());
-			}
-		}
-
 		return true;
 	}
 	ExecResult wait()
 	{
 		if (IS_VALID_HANDLE(pi_.hProcess) || IS_VALID_HANDLE(pi_.hThread)) {
 
-			// プロセス終了後に ClosePseudoConsole することで hPipeOutRead が EOF になる
-			wait_process_with_input(pi_.hProcess, hPipeInWrite_);
+			// Git終了後にClosePseudoConsoleすることでhPipeOutReadがEOFになる。
+			WaitForSingleObject(pi_.hProcess, INFINITE);
 			GetExitCodeProcess(pi_.hProcess, &result_.exit_code);
 			CloseHandle(pi_.hProcess);
 			CloseHandle(pi_.hThread);
 
-			// 入力しない場合でも、ここまでは書き込み端を保持する。
-			// 先に閉じると ConPTY が入力チャネルの終了として扱い、子プロセスも終了する。
+			// 入力転送スレッドを先に止めてから、ConPTY入力の書き込み端を閉じる。
+			// Git実行中にこの端を閉じると、ConPTYが入力終了として扱う場合がある。
+			stop_input_ = true;
 			if (input_writer_.joinable()) {
 				input_writer_.join();
 			}
@@ -544,6 +578,7 @@ int main(int argc, char **argv)
 	if (argc == 3) {
 		std::string_view arg = argv[1];
 		if (arg == subprocess_tag) {
+			// ワーカーモード: 親から渡されたコマンドを復元し、ConPTY内で実行する。
 			std::string cmd = base64_decode(argv[2]);
 			WinConPTY conpty;
 			conpty.exec(cmd);
@@ -556,6 +591,7 @@ int main(int argc, char **argv)
 		}
 	}
 
+	// 監督モード: 同じ実行ファイルをワーカーとして再起動する。
 	char tmp[_MAX_PATH];
 	memset(tmp, 0, sizeof(tmp));
 	GetModuleFileNameA(NULL, tmp, _countof(tmp));
@@ -573,10 +609,26 @@ int main(int argc, char **argv)
 	}
 	gitcmd = "git -c core.sshCommand=\"" + ssh + "\" " + gitcmd;
 
+	// 引用符や空白を含むGitコマンドを自己再実行の引数として安全に渡す。
 	cmd += ' ' + std::string(subprocess_tag) + ' ' + base64_encode(gitcmd);
 
 	WinProcess proc;
-	proc.exec(cmd);
+	if (!proc.exec(cmd)) {
+		fprintf(stderr, "Failed to start ConPTY worker.\n");
+		return 128;
+	}
+
+	// SSHが入力待ちになったことを出力から確認してから、親側で決めた回答を送る。
+	// 先に送ると、SSHがまだ入力を受け付けておらず回答を失う可能性がある。
+	std::string prompt = "Are you sure you want to continue connecting";
+	if (proc.wait_for_output(prompt)) {
+		std::string send = "no\n";
+		if (!proc.write_input(send.data(), send.size())) {
+			fprintf(stderr, "Failed to write to ConPTY worker.\n");
+		}
+	}
+	proc.close_input();
+	proc.wait();
 
 	return 0;
 }
