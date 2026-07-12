@@ -7,5 +7,9 @@ CONFIG += console
 # win32:LIBS += -L$$PWD\winpty\x64\lib -lwinpty
 
 HEADERS += main.h \
-	base64.h
-SOURCES += main.cpp
+	WinProcess.h \
+	base64.h \
+	misc.h
+SOURCES += main.cpp \
+	WinProcess.cpp \
+	misc.cpp
