@@ -4,10 +4,12 @@
 #endif
 
 #include <windows.h>
+#include <assert.h>
 #include <cstdio>
 #include <string>
 #include <string_view>
 #include <thread>
+#include "base64.h"
 
 namespace misc {
 
@@ -150,6 +152,64 @@ private:
 };
 
 }
+
+//
+
+std::string exec_git_win(std::string const &cmd)
+{
+	std::string ret;
+
+	HANDLE hReadPipe = nullptr;
+	HANDLE hWritePipe = nullptr;
+	SECURITY_ATTRIBUTES sa = {};
+	sa.nLength = sizeof(sa);
+	sa.bInheritHandle = TRUE;
+	if (!CreatePipe(&hReadPipe, &hWritePipe, &sa, 0)) {
+		return ret;
+	}
+	SetHandleInformation(hReadPipe, HANDLE_FLAG_INHERIT, 0);
+
+	STARTUPINFOW si = {};
+	si.cb = sizeof(si);
+	si.dwFlags = STARTF_USESTDHANDLES;
+	si.hStdOutput = hWritePipe;
+	si.hStdError = hWritePipe;
+
+	PROCESS_INFORMATION pi = {};
+	std::wstring wcmd = misc::convert_str_to_wstr(cmd);
+	BOOL ok = CreateProcessW(
+		nullptr, wcmd.data(),
+		nullptr, nullptr,
+		TRUE, 0,
+		nullptr, nullptr,
+		&si, &pi
+	);
+	CloseHandle(hWritePipe);
+
+	if (!ok) {
+		CloseHandle(hReadPipe);
+		return ret;
+	}
+
+	char buf[256];
+	DWORD n;
+	while (ReadFile(hReadPipe, buf, sizeof(buf), &n, nullptr) && n > 0) {
+		ret.append(buf, n);
+	}
+	CloseHandle(hReadPipe);
+
+	WaitForSingleObject(pi.hProcess, INFINITE);
+	CloseHandle(pi.hProcess);
+	CloseHandle(pi.hThread);
+
+	while (!ret.empty() && (ret.back() == '\n' || ret.back() == '\r')) {
+		ret.pop_back();
+	}
+
+	return ret;
+}
+
+//
 
 struct ExecResult {
 	bool started = false;
@@ -377,12 +437,32 @@ bool is_conpty_available()
 	return GetProcAddress(hKernel32, "CreatePseudoConsole") != nullptr;
 }
 
-int main()
+constexpr std::string_view subprocess_tag = "--conpty-subprocess--";
+
+int main(int argc, char **argv)
 {
 	if (!is_conpty_available()) {
 		fprintf(stderr, "ConPTY is not available on this system.\n");
 		return 1;
 	}
+
+	if (argc == 3) {
+		std::string_view arg = argv[1];
+		if (arg == subprocess_tag) {
+			std::string cmd = base64_decode(argv[2]);
+			ExecResult result = exec_git_conpty(cmd);
+			if (!result.started) {
+				fprintf(stderr, "Failed to start process (error %lu).\n", result.error_code);
+				return 128;
+			}
+			return 0;
+		}
+	}
+
+	char tmp[_MAX_PATH];
+	memset(tmp, 0, sizeof(tmp));
+	GetModuleFileNameA(NULL, tmp, _countof(tmp));
+	std::string cmd = "\"" + std::string(tmp) + "\"";
 
 	// std::string gitcmd = "--version";
 	std::string gitcmd = "fetch";
@@ -393,14 +473,13 @@ int main()
 		fprintf(stderr, "Windows OpenSSH client was not found.\n");
 		return 1;
 	}
-	std::string cmd = "git -c core.sshCommand=\"" + ssh + "\" " + gitcmd;
+	gitcmd = "git -c core.sshCommand=\"" + ssh + "\" " + gitcmd;
 
-	ExecResult result = exec_git_conpty(cmd);
-	if (!result.started) {
-		fprintf(stderr, "Failed to start process (error %lu).\n", result.error_code);
-		return 128;
-	}
+	cmd += ' ' + std::string(subprocess_tag) + ' ' + base64_encode(gitcmd);
 
-	return result.exit_code == 0 ? 0 : 128;
+	std::string s = exec_git_win(cmd);
+	fprintf(stdout, "result: {%s}\n", s.c_str());
+
+	return 0;
 }
 

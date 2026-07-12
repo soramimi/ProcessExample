@@ -6,5 +6,6 @@ CONFIG += console
 # win32:INCLUDEPATH += winpty\include
 # win32:LIBS += -L$$PWD\winpty\x64\lib -lwinpty
 
-HEADERS += main.h
+HEADERS += main.h \
+	base64.h
 SOURCES += main.cpp
