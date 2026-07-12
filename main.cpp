@@ -11,6 +11,11 @@
 #include <thread>
 #include "base64.h"
 
+static inline bool IS_VALID_HANDLE(HANDLE h)
+{
+	return h && h != INVALID_HANDLE_VALUE;
+}
+
 namespace misc {
 
 std::wstring convert_str_to_wstr(std::string const &str)
@@ -29,12 +34,10 @@ std::string convert_wstr_to_str(std::wstring const &wstr)
 {
 	std::string str;
 	if (wstr.empty()) return str;
-	int len = WideCharToMultiByte(CP_UTF8, 0, wstr.c_str(), static_cast<int>(wstr.size()),
-								nullptr, 0, nullptr, nullptr);
+	int len = WideCharToMultiByte(CP_UTF8, 0, wstr.c_str(), static_cast<int>(wstr.size()), nullptr, 0, nullptr, nullptr);
 	if (len > 0) {
 		str.resize(len);
-		WideCharToMultiByte(CP_UTF8, 0, wstr.c_str(), static_cast<int>(wstr.size()),
-							&str[0], len, nullptr, nullptr);
+		WideCharToMultiByte(CP_UTF8, 0, wstr.c_str(), static_cast<int>(wstr.size()), &str[0], len, nullptr, nullptr);
 	}
 	return str;
 }
@@ -59,8 +62,9 @@ std::string find_windows_openssh()
 
 class VtStripper {
 public:
-	void append(std::string_view input, std::string &output)
+	std::string append(std::string_view input)
 	{
+		std::string output;
 		for (unsigned char c : input) {
 			switch (state_) {
 			case State::Text:
@@ -134,6 +138,7 @@ public:
 				break;
 			}
 		}
+		return output;
 	}
 
 private:
@@ -155,70 +160,6 @@ private:
 
 //
 
-std::string exec_git_win(std::string const &cmd)
-{
-	std::string ret;
-
-	HANDLE hReadPipe = nullptr;
-	HANDLE hWritePipe = nullptr;
-	SECURITY_ATTRIBUTES sa = {};
-	sa.nLength = sizeof(sa);
-	sa.bInheritHandle = TRUE;
-	if (!CreatePipe(&hReadPipe, &hWritePipe, &sa, 0)) {
-		return ret;
-	}
-	SetHandleInformation(hReadPipe, HANDLE_FLAG_INHERIT, 0);
-
-	STARTUPINFOW si = {};
-	si.cb = sizeof(si);
-	si.dwFlags = STARTF_USESTDHANDLES;
-	si.hStdOutput = hWritePipe;
-	si.hStdError = hWritePipe;
-
-	PROCESS_INFORMATION pi = {};
-	std::wstring wcmd = misc::convert_str_to_wstr(cmd);
-	BOOL ok = CreateProcessW(
-		nullptr, wcmd.data(),
-		nullptr, nullptr,
-		TRUE, 0,
-		nullptr, nullptr,
-		&si, &pi
-	);
-	CloseHandle(hWritePipe);
-
-	if (!ok) {
-		CloseHandle(hReadPipe);
-		return ret;
-	}
-
-	char buf[256];
-	DWORD n;
-	while (ReadFile(hReadPipe, buf, sizeof(buf), &n, nullptr) && n > 0) {
-		ret.append(buf, n);
-	}
-	CloseHandle(hReadPipe);
-
-	WaitForSingleObject(pi.hProcess, INFINITE);
-	CloseHandle(pi.hProcess);
-	CloseHandle(pi.hThread);
-
-	while (!ret.empty() && (ret.back() == '\n' || ret.back() == '\r')) {
-		ret.pop_back();
-	}
-
-	return ret;
-}
-
-//
-
-struct ExecResult {
-	bool started = false;
-	DWORD exit_code = static_cast<DWORD>(-1);
-	DWORD error_code = ERROR_SUCCESS;
-	std::string raw_output;
-	std::string text_output;
-};
-
 bool write_all(HANDLE handle, char const *data, size_t size)
 {
 	while (size > 0) {
@@ -233,10 +174,94 @@ bool write_all(HANDLE handle, char const *data, size_t size)
 	return true;
 }
 
+//
+
+class WinProcess {
+private:
+	bool use_input_ = false;
+	HANDLE hWritePipe_ = nullptr;
+public:
+	bool exec(std::string const &cmd)
+	{
+		HANDLE hReadPipe = nullptr;
+		SECURITY_ATTRIBUTES sa = {};
+		sa.nLength = sizeof(sa);
+		sa.bInheritHandle = TRUE;
+		if (!CreatePipe(&hReadPipe, &hWritePipe_, &sa, 0)) {
+			return false;
+		}
+		SetHandleInformation(hReadPipe, HANDLE_FLAG_INHERIT, 0);
+
+		STARTUPINFOW si = {};
+		si.cb = sizeof(si);
+		si.dwFlags = STARTF_USESTDHANDLES;
+		si.hStdOutput = hWritePipe_;
+		si.hStdError = hWritePipe_;
+
+		PROCESS_INFORMATION pi = {};
+		std::wstring wcmd = misc::convert_str_to_wstr(cmd);
+		BOOL ok = CreateProcessW(
+					nullptr, wcmd.data(),
+					nullptr, nullptr,
+					TRUE, 0,
+					nullptr, nullptr,
+					&si, &pi
+					);
+
+		if (!use_input_) {
+			close_input();
+		}
+
+		if (!ok) {
+			CloseHandle(hReadPipe);
+			return false;
+		}
+
+		HANDLE hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE);
+
+		char buf[256];
+		DWORD n;
+		while (ReadFile(hReadPipe, buf, sizeof(buf), &n, nullptr) && n > 0) {
+			WriteFile(hStdOutput, buf, n, &n, nullptr);
+		}
+		CloseHandle(hReadPipe);
+
+		WaitForSingleObject(pi.hProcess, INFINITE);
+		CloseHandle(pi.hProcess);
+		CloseHandle(pi.hThread);
+
+		return true;
+	}
+	void close_input()
+	{
+		CloseHandle(hWritePipe_);
+		hWritePipe_ = nullptr;
+	}
+	bool write_input(char const *ptr, size_t n)
+	{
+		if (hWritePipe_ != nullptr) {
+			if (write_all(hWritePipe_, ptr, static_cast<DWORD>(n))) {
+				return true;
+			}
+		}
+		return false;
+	}
+};
+
+//
+
+struct ExecResult {
+	bool started = false;
+	DWORD exit_code = static_cast<DWORD>(-1);
+	DWORD error_code = ERROR_SUCCESS;
+	// std::string raw_output;
+	// std::string text_output;
+};
+
 void wait_process_with_input(HANDLE process, HANDLE &conpty_input)
 {
 	HANDLE parent_input = GetStdHandle(STD_INPUT_HANDLE);
-	if (!parent_input || parent_input == INVALID_HANDLE_VALUE) {
+	if (!IS_VALID_HANDLE(parent_input)) {
 		WaitForSingleObject(process, INFINITE);
 		return;
 	}
@@ -272,8 +297,7 @@ void wait_process_with_input(HANDLE process, HANDLE &conpty_input)
 				}
 
 				char utf8[4];
-				int length = WideCharToMultiByte(CP_UTF8, 0, &key.uChar.UnicodeChar, 1,
-										  utf8, sizeof(utf8), nullptr, nullptr);
+				int length = WideCharToMultiByte(CP_UTF8, 0, &key.uChar.UnicodeChar, 1, utf8, sizeof(utf8), nullptr, nullptr);
 				for (WORD repeat = 0; repeat < key.wRepeatCount && length > 0; repeat++) {
 					input.append(utf8, length);
 				}
@@ -297,138 +321,196 @@ void wait_process_with_input(HANDLE process, HANDLE &conpty_input)
 	WaitForSingleObject(process, INFINITE);
 }
 
-ExecResult exec_git_conpty(std::string const &cmd)
-{
-	// setup for experimentation
-	ExecResult result;
-
-	misc::VtStripper vt_stripper;
-
-	auto writeOutput = [&](char const *buf, size_t len){
-		fwrite(buf, 1, len, stdout);
-		fflush(stdout);
-		result.text_output.append(buf, len);
-	};
-
-	//
-
-	HANDLE hPipeInRead = nullptr;
-	HANDLE hPipeInWrite = nullptr;
-	HANDLE hPipeOutRead = nullptr;
-	HANDLE hPipeOutWrite = nullptr;
-
-	if (!CreatePipe(&hPipeInRead, &hPipeInWrite, nullptr, 0)) {
-		result.error_code = GetLastError();
-		return result;
+class WinConPTY {
+private:
+	ExecResult result_;
+	PROCESS_INFORMATION pi_ = {};
+	BOOL running_ = FALSE;
+	HPCON hPC_ = nullptr;
+	HANDLE hPipeInRead_ = nullptr;
+	HANDLE hPipeInWrite_ = nullptr;
+	HANDLE hPipeOutRead_ = nullptr;
+	HANDLE hPipeOutWrite_ = nullptr;
+	std::thread input_writer_;
+	std::thread output_reader_;
+public:
+	WinConPTY()
+	{
 	}
-	if (!CreatePipe(&hPipeOutRead, &hPipeOutWrite, nullptr, 0)) {
-		result.error_code = GetLastError();
-		CloseHandle(hPipeInRead);
-		CloseHandle(hPipeInWrite);
-		return result;
+	~WinConPTY()
+	{
+		wait();
 	}
 
-	HPCON hPC = nullptr;
-	COORD size = {80, 25};
-	HRESULT hr = CreatePseudoConsole(size, hPipeInRead, hPipeOutWrite, 0, &hPC);
-	// ConPTY に接続する子プロセスを作成するまで、パイプ端は保持する。
-	if (FAILED(hr)) {
-		result.error_code = static_cast<DWORD>(hr);
-		CloseHandle(hPipeInRead);
-		CloseHandle(hPipeInWrite);
-		CloseHandle(hPipeOutRead);
-		CloseHandle(hPipeOutWrite);
-		return result;
-	}
+	bool exec(std::string const &cmd)
+	{
+		misc::VtStripper vt_stripper;
 
-	SIZE_T attrSize = 0;
-	InitializeProcThreadAttributeList(nullptr, 1, 0, &attrSize);
+		if (!CreatePipe(&hPipeInRead_, &hPipeInWrite_, nullptr, 0)) {
+			result_.error_code = GetLastError();
+			return false;
+		}
+		if (!CreatePipe(&hPipeOutRead_, &hPipeOutWrite_, nullptr, 0)) {
+			result_.error_code = GetLastError();
+			CloseHandle(hPipeInRead_);
+			CloseHandle(hPipeInWrite_);
+			return false;
+		}
 
-	STARTUPINFOEXW siEx = {};
-	siEx.StartupInfo.cb = sizeof(siEx);
-	siEx.lpAttributeList = (LPPROC_THREAD_ATTRIBUTE_LIST)HeapAlloc(GetProcessHeap(), 0, attrSize);
-	if (!siEx.lpAttributeList
-			|| !InitializeProcThreadAttributeList(siEx.lpAttributeList, 1, 0, &attrSize)
-			|| !UpdateProcThreadAttribute(siEx.lpAttributeList, 0, PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, hPC, sizeof(hPC), nullptr, nullptr)) {
-		result.error_code = siEx.lpAttributeList ? GetLastError() : ERROR_NOT_ENOUGH_MEMORY;
-		if (siEx.lpAttributeList) HeapFree(GetProcessHeap(), 0, siEx.lpAttributeList);
-		CloseHandle(hPipeInRead);
-		CloseHandle(hPipeInWrite);
-		CloseHandle(hPipeOutRead);
-		CloseHandle(hPipeOutWrite);
-		ClosePseudoConsole(hPC);
-		return result;
-	}
+		COORD size = {80, 25};
+		HRESULT hr = CreatePseudoConsole(size, hPipeInRead_, hPipeOutWrite_, 0, &hPC_);
+		// ConPTY に接続する子プロセスを作成するまで、パイプ端は保持する。
+		if (FAILED(hr)) {
+			result_.error_code = static_cast<DWORD>(hr);
+			CloseHandle(hPipeInRead_);
+			CloseHandle(hPipeInWrite_);
+			CloseHandle(hPipeOutRead_);
+			CloseHandle(hPipeOutWrite_);
+			return false;
+		}
 
-	std::wstring wcmd = misc::convert_str_to_wstr(cmd);
+		SIZE_T attrSize = 0;
+		InitializeProcThreadAttributeList(nullptr, 1, 0, &attrSize);
 
-	PROCESS_INFORMATION pi = {};
-	BOOL ok = CreateProcessW(nullptr,
-							 wcmd.data(),
-							 nullptr,
-							 nullptr,
-							 FALSE,
-							 CREATE_SUSPENDED | EXTENDED_STARTUPINFO_PRESENT,
-							 nullptr,
-							 nullptr,
-							 &siEx.StartupInfo,
-							 &pi);
-	if (!ok) {
-		result.error_code = GetLastError();
-	}
+		STARTUPINFOEXW siEx = {};
+		siEx.StartupInfo.cb = sizeof(siEx);
+		siEx.lpAttributeList = (LPPROC_THREAD_ATTRIBUTE_LIST)HeapAlloc(GetProcessHeap(), 0, attrSize);
+		if (!siEx.lpAttributeList
+				|| !InitializeProcThreadAttributeList(siEx.lpAttributeList, 1, 0, &attrSize)
+				|| !UpdateProcThreadAttribute(siEx.lpAttributeList, 0, PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, hPC_, sizeof(hPC_), nullptr, nullptr)) {
+			result_.error_code = siEx.lpAttributeList ? GetLastError() : ERROR_NOT_ENOUGH_MEMORY;
+			if (siEx.lpAttributeList) HeapFree(GetProcessHeap(), 0, siEx.lpAttributeList);
+			CloseHandle(hPipeInRead_);
+			CloseHandle(hPipeInWrite_);
+			CloseHandle(hPipeOutRead_);
+			CloseHandle(hPipeOutWrite_);
+			ClosePseudoConsole(hPC_);
+			return false;
+		}
 
-	DeleteProcThreadAttributeList(siEx.lpAttributeList);
-	HeapFree(GetProcessHeap(), 0, siEx.lpAttributeList);
+		std::wstring wcmd = misc::convert_str_to_wstr(cmd);
 
-	// CreateProcessW が完了するまで、CreatePseudoConsole に渡したパイプ端を保持する。
-	CloseHandle(hPipeInRead);
-	CloseHandle(hPipeOutWrite);
+		running_ = CreateProcessW(nullptr,
+								 wcmd.data(),
+								 nullptr,
+								 nullptr,
+								 FALSE,
+								 CREATE_SUSPENDED | EXTENDED_STARTUPINFO_PRESENT,
+								 nullptr,
+								 nullptr,
+								 &siEx.StartupInfo,
+								 &pi_);
+		if (!running_) {
+			result_.error_code = GetLastError();
+		}
 
-	if (!ok) {
-		CloseHandle(hPipeInWrite);
-		hPipeInWrite = nullptr;
-		CloseHandle(hPipeOutRead);
-		ClosePseudoConsole(hPC);
-		return result;
-	}
-	result.started = true;
+		DeleteProcThreadAttributeList(siEx.lpAttributeList);
+		HeapFree(GetProcessHeap(), 0, siEx.lpAttributeList);
 
-	// ConPTY の出力はプロセスの実行中から継続して排出する必要がある。
-	std::thread output_reader([&]{
-		char buf[256];
-		DWORD n;
-		while (ReadFile(hPipeOutRead, buf, sizeof(buf), &n, nullptr) && n > 0) {
-			result.raw_output.append(buf, n);
-			std::string text;
-			vt_stripper.append({buf, n}, text);
-			if (!text.empty()) {
-				writeOutput(text.data(), text.size());
+		// CreateProcessW が完了するまで、CreatePseudoConsole に渡したパイプ端を保持する。
+
+		CloseHandle(hPipeInRead_);
+		CloseHandle(hPipeOutWrite_);
+
+		if (!running_) {
+			CloseHandle(hPipeInWrite_);
+			hPipeInWrite_ = nullptr;
+			CloseHandle(hPipeOutRead_);
+			ClosePseudoConsole(hPC_);
+			return false;
+		}
+		result_.started = true;
+
+		HANDLE hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE);
+		HANDLE hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+
+		input_writer_ = std::thread([&]{
+			if (IS_VALID_HANDLE(hPipeInWrite_) && IS_VALID_HANDLE(hStdInput)) {
+				char buf[256];
+				DWORD n;
+				while (ReadFile(hStdInput, buf, sizeof(buf), &n, nullptr) && n > 0) {
+					if (!write_all(hPipeInWrite_, buf, n)) {
+						break;
+					}
+				}
+			}
+		});
+
+		// ConPTY の出力はプロセスの実行中から継続して排出する必要がある。
+		output_reader_ = std::thread([&]{
+			char buf[256];
+			DWORD n;
+			while (ReadFile(hPipeOutRead_, buf, sizeof(buf), &n, nullptr) && n > 0) {
+				std::string text = vt_stripper.append({buf, n});
+				WriteFile(hStdOutput, text.data(), static_cast<DWORD>(text.size()), &n, nullptr);
+			}
+		});
+
+		ResumeThread(pi_.hThread);
+
+		// debug input
+		{
+			if (IS_VALID_HANDLE(hPipeInWrite_)) {
+				Sleep(1000);
+				std::string send = "no\n";
+				write_input(send.c_str(), send.size());
 			}
 		}
-	});
 
-	ResumeThread(pi.hThread);
-
-	// プロセス終了後に ClosePseudoConsole することで hPipeOutRead が EOF になる
-	wait_process_with_input(pi.hProcess, hPipeInWrite);
-	GetExitCodeProcess(pi.hProcess, &result.exit_code);
-	CloseHandle(pi.hProcess);
-	CloseHandle(pi.hThread);
-	// 入力しない場合でも、ここまでは書き込み端を保持する。
-	// 先に閉じると ConPTY が入力チャネルの終了として扱い、子プロセスも終了する。
-	if (hPipeInWrite) {
-		CloseHandle(hPipeInWrite);
-		hPipeInWrite = nullptr;
+		return true;
 	}
+	ExecResult wait()
+	{
+		if (IS_VALID_HANDLE(pi_.hProcess) || IS_VALID_HANDLE(pi_.hThread)) {
 
-	// ClosePseudoConsole が生成する最終出力も、読み取りスレッドで受け取る。
-	ClosePseudoConsole(hPC);
+			// プロセス終了後に ClosePseudoConsole することで hPipeOutRead が EOF になる
+			wait_process_with_input(pi_.hProcess, hPipeInWrite_);
+			GetExitCodeProcess(pi_.hProcess, &result_.exit_code);
+			CloseHandle(pi_.hProcess);
+			CloseHandle(pi_.hThread);
 
-	output_reader.join();
-	CloseHandle(hPipeOutRead);
+			// 入力しない場合でも、ここまでは書き込み端を保持する。
+			// 先に閉じると ConPTY が入力チャネルの終了として扱い、子プロセスも終了する。
+			if (input_writer_.joinable()) {
+				input_writer_.join();
+			}
+			close_input();
 
-	return result;
-}
+			// ClosePseudoConsole が生成する最終出力も、読み取りスレッドで受け取る。
+			ClosePseudoConsole(hPC_);
+
+			if (output_reader_.joinable()) {
+				output_reader_.join();
+			}
+			CloseHandle(hPipeOutRead_);
+		}
+
+		running_ = FALSE;
+		pi_ = {};
+		hPC_ = nullptr;
+		hPipeInRead_ = nullptr;
+		hPipeInWrite_ = nullptr;
+		hPipeOutRead_ = nullptr;
+		hPipeOutWrite_ = nullptr;
+		return result_;
+	}
+	void close_input()
+	{
+		if (hPipeInWrite_) {
+			CloseHandle(hPipeInWrite_);
+			hPipeInWrite_ = nullptr;
+		}
+	}
+	bool write_input(char const *ptr, size_t n)
+	{
+		if (hPipeInWrite_ != nullptr) {
+			if (write_all(hPipeInWrite_, ptr, static_cast<DWORD>(n))) {
+				return true;
+			}
+		}
+		return false;
+	}
+};
 
 bool is_conpty_available()
 {
@@ -441,6 +523,19 @@ constexpr std::string_view subprocess_tag = "--conpty-subprocess--";
 
 int main(int argc, char **argv)
 {
+#if 0
+	{
+		std::string cmd = "git --version";
+		{
+			WinConPTY conpty;
+			conpty.exec(cmd);
+			conpty.close_input();
+			ExecResult result = conpty.wait();
+		}
+		return 0;
+	}
+#endif
+
 	if (!is_conpty_available()) {
 		fprintf(stderr, "ConPTY is not available on this system.\n");
 		return 1;
@@ -450,7 +545,9 @@ int main(int argc, char **argv)
 		std::string_view arg = argv[1];
 		if (arg == subprocess_tag) {
 			std::string cmd = base64_decode(argv[2]);
-			ExecResult result = exec_git_conpty(cmd);
+			WinConPTY conpty;
+			conpty.exec(cmd);
+			ExecResult result = conpty.wait();
 			if (!result.started) {
 				fprintf(stderr, "Failed to start process (error %lu).\n", result.error_code);
 				return 128;
@@ -466,6 +563,7 @@ int main(int argc, char **argv)
 
 	// std::string gitcmd = "--version";
 	std::string gitcmd = "fetch";
+
 	// Git同梱のMSYS版sshは、Gitが標準入出力をパイプ化するとConPTYを
 	// 確認入力用TTYとして再取得できないため、Win32 OpenSSHを明示する。
 	std::string ssh = misc::find_windows_openssh();
@@ -477,8 +575,8 @@ int main(int argc, char **argv)
 
 	cmd += ' ' + std::string(subprocess_tag) + ' ' + base64_encode(gitcmd);
 
-	std::string s = exec_git_win(cmd);
-	fprintf(stdout, "result: {%s}\n", s.c_str());
+	WinProcess proc;
+	proc.exec(cmd);
 
 	return 0;
 }
