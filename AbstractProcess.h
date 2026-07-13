@@ -85,8 +85,7 @@ public:
 	virtual bool isRunning() const = 0;
 	virtual int getExitCode() const = 0;
 	virtual void writeInput(char const *ptr, int len) = 0;
-
-	virtual int readOutputStreaming(char *ptr, int len) = 0;
+	virtual int readOutput(char *ptr, int len) = 0;
 };
 
 #endif // ABSTRACTPROCESS_H

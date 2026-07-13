@@ -1,6 +1,8 @@
 #ifndef WINPROCESS_H
 #define WINPROCESS_H
 
+#include "AbstractProcess.h"
+
 #include <windows.h>
 #include <thread>
 #include <mutex>
@@ -51,7 +53,7 @@ public:
 
 
 //
-class ProcessWinPty {
+class ProcessWinPty : public AbstractPtyProcess {
 private:
 	struct Private;
 	Private *m;
@@ -62,14 +64,15 @@ public:
 	~ProcessWinPty();
 	bool isRunning() const;
 	void writeInput(const char *ptr, int len);
-	void exec(const std::string &cmd, std::string const &env, bool use_input);
+	void start(const std::string &cmd, std::string const &env, bool use_input);
 	bool wait(unsigned long time = ULONG_MAX);
 	void stop();
-	int get_exit_code() const;
+	int getExitCode() const;
+	int readOutput(char *ptr, int len);
+
 	void readResult(std::vector<char> *out);
 	void close_input();
 
-	int read_output(char *ptr, int len);
 };
 
 #endif // WINPROCESS_H

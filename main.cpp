@@ -34,7 +34,7 @@ std::string find_windows_openssh()
 
 constexpr std::string_view subprocess_tag = "--conpty-subprocess--";
 
-int main(int argc, char **argv)
+int main_conpty(int argc, char **argv)
 {
 #if 0
 	{
@@ -112,3 +112,28 @@ int main(int argc, char **argv)
 	return 0;
 }
 
+int main_winpty(int argc, char **argv)
+{
+	std::string cmd = R"("C:\Program Files\Git\cmd\git.exe")";
+	cmd += " --version";
+	ProcessWinPty proc;
+	proc.start(cmd, {}, false);
+	proc.wait();
+	{
+		char tmp[1024];
+		int len = proc.readOutput(tmp, sizeof(tmp) - 1);
+		tmp[len] = 0;
+		puts(tmp);
+	}
+	return 0;
+}
+
+int main(int argc, char **argv)
+{
+	if (0) {
+		main_conpty(argc, argv);
+	} else {
+		main_winpty(argc, argv);
+	}
+	return 0;
+}

@@ -1,6 +1,9 @@
 #include "WinProcess.h"
 #include "misc.h"
 #include <winpty.h>
+#include <thread>
+#include <mutex>
+#include <condition_variable>
 
 namespace {
 
@@ -752,7 +755,7 @@ void ProcessWinPty::writeInput(const char *ptr, int len)
 	}
 }
 
-void ProcessWinPty::exec(const std::string &cmd, const std::string &env, bool use_input)
+void ProcessWinPty::start(const std::string &cmd, const std::string &env, bool use_input)
 {
 	m->thread = std::thread([&](std::string const &cmd, std::string const &env, bool use_input){
 			exec_winpty(cmd, env, use_input);
@@ -780,7 +783,7 @@ void ProcessWinPty::stop()
 	wait();
 }
 
-int ProcessWinPty::get_exit_code() const
+int ProcessWinPty::getExitCode() const
 {
 	return m->exit_code;
 }
@@ -799,7 +802,7 @@ void ProcessWinPty::close_input()
 	}
 }
 
-int ProcessWinPty::read_output(char *ptr, int len)
+int ProcessWinPty::readOutput(char *ptr, int len)
 {
 	std::lock_guard<std::mutex> lock(mutex_);
 	int n = output_queue_.size();
