@@ -10,6 +10,8 @@ std::string convert_wstr_to_str(std::wstring const &wstr);
 
 std::string_view getProgram(std::string_view cmdline);
 
+std::string find_windows_openssh();
+
 }
 
 #endif // MISC_H

@@ -1,0 +1,112 @@
+# ProcessExample — Agent Notes
+
+このドキュメントは、ProcessExample プロジェクトの**現在の実験的実装**をまとめたものです。人間向けの概覧は `README.md`、ConPTY 実験の詳細は `ConPTY.md` を参照してください。
+
+## プロジェクト概要
+
+- **目的**: Windows ConPTY (`CreatePseudoConsole`) を使って子プロセス（主に Git）を起動し、その入出力を確実に取得・制御する実験コード。
+- **主要な実験シナリオ**: `known_hosts` を削除した状態で `git fetch` を実行し、SSH のホスト鍵確認プロンプト (`Are you sure you want to continue connecting...`) を検出して `no\n` を送信し、フェッチを拒否する一連の動作を確認する。
+- **ターゲットプラットフォーム**: Windows のみ（ConPTY, Win32 API 前提）。
+
+## ビルド方法
+
+qmake + MSVC (nmake) でビルドします。
+
+```powershell
+qmake process-example.pro
+nmake
+```
+
+実行バイナリは `_bin/process-example.exe` に出力されます。
+
+## プロジェクト構造
+
+```
+process-example.pro         — qmake プロジェクトファイル
+main.cpp                    — エントリポイント、各種動作確認用 main 関数群
+
+AbstractProcess.h/cpp       — プロセスの抽象基底クラス
+WinProcess.h/cpp            — Windows プロセス実装（BasicProcessWin, BasicProcessWinConPTY, ProcessWinPty）
+ProcessWin.h/cpp            — AbstractProcess 継承ラッパー（ProcessWin, ProcessWinConPty）
+ProcessConPtyWithWorker.h/cpp — worker/subprocess 構成の ConPTY 実装（AbstractProcess 継承）
+
+misc.h/cpp                  — ユーティリティ（UTF-8/Wide 変換、コマンドライン解析、find_windows_openssh）
+base64.h                    — Base64 エンコード/デコード（ヘッダオンリー）
+winpty/                     — バンドルされた winpty ライブラリ（現在未使用）
+ConPTY.md                   — ConPTY 実験メモ（躓きポイント、設計判断の記録）
+README.md                   — 人間向けのプロジェクト概覧（変更禁止）
+```
+
+## 主要クラス
+
+### 基本実装（WinProcess.h）
+
+| クラス | 役割 |
+|---|---|
+| `BasicProcessWin` | 匿名パイプ + `CreateProcessW` で子プロセスを起動。入出力双方向パイプ、蓄積出力バッファ、プロンプト検索 (`wait_for_output`) を持つ。 |
+| `BasicProcessWinConPTY` | ConPTY を直接所有するワーカー実装。入出力転送スレッド、VT シーケンス除去 (`VtStripper`) を内包する。 |
+| `ProcessWinPty` | winpty 版。`AbstractPtyProcess` を継承。 |
+
+### AbstractProcess 継承ラッパー
+
+| クラス | 基底クラス | ラップ対象 | 特徴 |
+|---|---|---|---|
+| `ProcessWin` | `AbstractProcess` | `BasicProcessWin` | 標準パイプ版。 `stdout_bytes`/`stderr_bytes` をメモリバッファで提供。stderr は stdout と統合されるため空。 |
+| `ProcessWinConPty` | `AbstractProcess` | `BasicProcessWinConPTY` | ConPTY 版。同上。 |
+| `ProcessConPtyWithWorker` | `AbstractProcess` | `BasicProcessWin` + `BasicProcessWinConPTY` | **監督プロセス/ワーカープロセスの 2 段階構成**。自分自身を subprocess タグ付きで再起動し、ConPTY は分離したワーカー内で所有する。 |
+
+### AbstractProcess インターフェース
+
+```cpp
+virtual void start(const std::string &command, bool use_input) = 0;
+virtual int wait() = 0;
+virtual void stop() = 0;
+virtual bool isRunning() const = 0;
+virtual int getExitCode() const = 0;
+virtual void writeInput(char const *ptr, int len) = 0;
+virtual void closeInput(bool justnow) = 0;
+virtual std::vector<char> const &stdout_bytes() const = 0;
+virtual std::vector<char> const &stderr_bytes() const = 0;
+```
+
+- `stdout_bytes()` は実行中でも呼べるよう、内部バッファを逐次更新する。`const` メソッドだが `mutable` なキャッシュを更新する。
+
+## ProcessConPtyWithWorker の動作フロー
+
+1. **エントリポイント (`main`)**:
+   - まず `ProcessConPtyWithWorker::run_worker(argc, argv)` を呼び出す。`--conpty-subprocess--` 引数があればワーカーモード。
+   - ワーカーモード: Base64 デコードしたコマンドを `BasicProcessWinConPTY` で実行し、終了コードを返して即終了。
+   - 監督モード: `main_win_conpty_with_worker` へ進む。
+
+2. **監督モード**:
+   - `start(cmd, false)` で自分自身を subprocess タグ付きで再起動。`BasicProcessWin` でパイプ接続。
+   - `wait_for_output("Are you sure you want to continue connecting")` でプロンプト検出。
+   - 検出後 `writeInput("no\n", 3)` を送信。
+   - `closeInput(false)` → `wait()` で終了待ち。
+
+3. **ワーカーモード**:
+   - 親からパイプで接続された stdin/stdout を ConPTY 入出力パイプに中継。
+   - 出力スレッドで VT シーケンスを除去し、親へ逐次転送。
+
+## 注意点・制約
+
+- **実験的コード**: エラーハンドリングやタイムアウトは最小限。本番利用を意図していない。
+- **Windows 限定**: ConPTY (`CreatePseudoConsole`) は Windows 10 version 1809 以降が必要。
+- **SSH の種類**: Git for Windows 同梱の MSYS 版 SSH は ConPTY 環境で確認用 TTY を再取得できない場合がある。Windows OpenSSH (`C:\Windows\System32\OpenSSH\ssh.exe`) を明示的に指定する (`misc::find_windows_openssh`)。
+- **プロセス構成**: `ProcessConPtyWithWorker` は「Qt Creator など外側の疑似端末」と「内側の ConPTY」の寿命干渉を避けるため、プロセスを分離している。
+- **入出力統合**: ConPTY では stdout と stderr が統合されるため、`stderr_bytes()` は基本的に空。
+- **VT シーケンス**: `BasicProcessWinConPTY` の出力スレッド内で `VtStripper` が状態を保持しつつ除去する。`ReadFile` のチャンク境界をまたぐシーケンスにも対応。
+
+## 変更履歴（このセッションで実施）
+
+1. `BasicProcessWin` / `BasicProcessWinConPTY` に `isRunning()`, `getOutput()`/`stdout_bytes()`, `getExitCode()` を追加し、メモリバッファリング機構を導入。
+2. `ProcessWin` / `ProcessWinConPty`（`AbstractProcess` 継承ラッパー）を新規作成。
+3. `ProcessConPtyWithWorker`（`AbstractProcess` 継承）を新規作成。worker/subprocess 分離構成をクラス化。
+4. `misc` に `find_windows_openssh()` を移動し、再利用可能に。
+5. `main.cpp` を `ProcessConPtyWithWorker` を使う形に整理。エントリポイントで worker モードを判定するように変更。
+6. `process-example.pro` に新規ファイルを追加。
+
+## 参考
+
+- `ConPTY.md` — 各種躓きポイント、設計判断、終了順序の詳細。
+- `README.md` — オリジナルのプロジェクト概要（複数プラットフォーム比較の文脈で記述されているが、現在のコードは Windows ConPTY 実験専用）。

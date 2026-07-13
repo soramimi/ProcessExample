@@ -31,6 +31,24 @@ std::string misc::convert_wstr_to_str(const std::wstring &wstr)
  * コマンドラインから実行ファイル名を抜き取る。
  * 例: "C:\Program Files\MyApp\app.exe" --option -> C:\Program Files\MyApp\app.exe
  */
+std::string misc::find_windows_openssh()
+{
+	wchar_t system_dir[MAX_PATH];
+	UINT len = GetSystemDirectoryW(system_dir, ARRAYSIZE(system_dir));
+	if (len == 0 || len >= ARRAYSIZE(system_dir)) return {};
+
+	std::wstring path(system_dir, len);
+	path += L"\\OpenSSH\\ssh.exe";
+	DWORD attributes = GetFileAttributesW(path.c_str());
+	if (attributes == INVALID_FILE_ATTRIBUTES || (attributes & FILE_ATTRIBUTE_DIRECTORY)) return {};
+
+	std::string result = misc::convert_wstr_to_str(path);
+	for (char &c : result) {
+		if (c == '\\') c = '/';
+	}
+	return result;
+}
+
 std::string_view misc::getProgram(std::string_view cmdline)
 {
 	char const *begin = cmdline.data();

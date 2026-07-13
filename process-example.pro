@@ -10,10 +10,12 @@ HEADERS += main.h \
 	AbstractProcess.h \
 	WinProcess.h \
 	ProcessWin.h \
+	ProcessConPtyWithWorker.h \
 	base64.h \
 	misc.h
 SOURCES += main.cpp \
 	AbstractProcess.cpp \
 	WinProcess.cpp \
 	ProcessWin.cpp \
+	ProcessConPtyWithWorker.cpp \
 	misc.cpp
