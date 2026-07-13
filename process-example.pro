@@ -7,9 +7,11 @@ win32:INCLUDEPATH += winpty\include
 win32:LIBS += -L$$PWD\winpty\x64\lib -lwinpty
 
 HEADERS += main.h \
+	AbstractProcess.h \
 	WinProcess.h \
 	base64.h \
 	misc.h
 SOURCES += main.cpp \
+	AbstractProcess.cpp \
 	WinProcess.cpp \
 	misc.cpp
