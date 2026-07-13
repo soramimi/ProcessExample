@@ -5,3 +5,5 @@ myapp
 _bin/
 build/
 .vs/
+.qmake.stash
+*.obj

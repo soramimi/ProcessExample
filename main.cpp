@@ -130,7 +130,7 @@ int main_winpty(int argc, char **argv)
 
 int main(int argc, char **argv)
 {
-	if (0) {
+	if (1) {
 		main_conpty(argc, argv);
 	} else {
 		main_winpty(argc, argv);

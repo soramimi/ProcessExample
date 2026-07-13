@@ -241,6 +241,7 @@ struct WinProcess::Private {
 		AutoProcessInformation pi;
 		std::string output;
 		bool output_closed = false;
+		DWORD exit_code = static_cast<DWORD>(-1);
 	} d;
 	std::thread output_reader;
 	std::mutex output_mutex;
@@ -350,6 +351,10 @@ bool WinProcess::wait()
 	bool started = IS_VALID_HANDLE(m->pi().hProcess);
 	if (started) {
 		WaitForSingleObject(m->pi().hProcess, INFINITE);
+		DWORD ec = static_cast<DWORD>(-1);
+		if (GetExitCodeProcess(m->pi().hProcess, &ec)) {
+			m->d.exit_code = ec;
+		}
 	}
 	m->d.pi = {};
 
@@ -391,6 +396,22 @@ bool WinProcess::write_input(const char *ptr, size_t n)
 	return false;
 }
 
+bool WinProcess::isRunning() const
+{
+	return IS_VALID_HANDLE(m->pi().hProcess) || IS_VALID_HANDLE(m->pi().hThread);
+}
+
+std::string WinProcess::getOutput() const
+{
+	std::lock_guard<std::mutex> lock(m->output_mutex);
+	return m->d.output;
+}
+
+int WinProcess::getExitCode() const
+{
+	return static_cast<int>(m->d.exit_code);
+}
+
 // WinConPTY
 
 struct WinConPTY::Private {
@@ -403,7 +424,10 @@ struct WinConPTY::Private {
 		AutoHandle hPipeOutRead;
 		AutoHandle hPipeOutWrite;
 		WinConPTY::ExecResult result;
+		std::string output;
+		bool output_closed = false;
 	} d;
+	mutable std::mutex output_mutex;
 	std::atomic<bool> stop_input{false};
 	std::thread input_writer;
 	std::thread output_reader;
@@ -528,7 +552,15 @@ bool WinConPTY::exec(const std::string &cmd)
 		DWORD n;
 		while (ReadFile(m->d.hPipeOutRead, buf, sizeof(buf), &n, nullptr) && n > 0) {
 			std::string text = vt_stripper.append({buf, n});
-			WriteFile(hStdOutput, text.data(), static_cast<DWORD>(text.size()), &n, nullptr);
+			if (!text.empty()) {
+				WriteFile(hStdOutput, text.data(), static_cast<DWORD>(text.size()), &n, nullptr);
+				std::lock_guard<std::mutex> lock(m->output_mutex);
+				m->d.output.append(text);
+			}
+		}
+		{
+			std::lock_guard<std::mutex> lock(m->output_mutex);
+			m->d.output_closed = true;
 		}
 	});
 
@@ -583,6 +615,22 @@ bool WinConPTY::write_input(const char *ptr, size_t n)
 		}
 	}
 	return false;
+}
+
+bool WinConPTY::isRunning() const
+{
+	return IS_VALID_HANDLE(m->d.pi->hProcess) || IS_VALID_HANDLE(m->d.pi->hThread);
+}
+
+std::string WinConPTY::getOutput() const
+{
+	std::lock_guard<std::mutex> lock(m->output_mutex);
+	return m->d.output;
+}
+
+int WinConPTY::getExitCode() const
+{
+	return static_cast<int>(m->d.result.exit_code);
 }
 
 bool WinConPTY::is_conpty_available()

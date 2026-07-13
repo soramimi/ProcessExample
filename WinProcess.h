@@ -23,6 +23,9 @@ public:
 	bool wait_for_output(std::string const &text);
 	void close_input();
 	bool write_input(char const *ptr, size_t n);
+	bool isRunning() const;
+	std::string getOutput() const;
+	int getExitCode() const;
 };
 
 //
@@ -47,6 +50,9 @@ public:
 	ExecResult wait();
 	void close_input();
 	bool write_input(char const *ptr, size_t n);
+	bool isRunning() const;
+	std::string getOutput() const;
+	int getExitCode() const;
 
 	static bool is_conpty_available();
 };

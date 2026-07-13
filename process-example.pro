@@ -9,9 +9,11 @@ win32:LIBS += -L$$PWD\winpty\x64\lib -lwinpty
 HEADERS += main.h \
 	AbstractProcess.h \
 	WinProcess.h \
+	ProcessWin.h \
 	base64.h \
 	misc.h
 SOURCES += main.cpp \
 	AbstractProcess.cpp \
 	WinProcess.cpp \
+	ProcessWin.cpp \
 	misc.cpp
