@@ -6,7 +6,7 @@
 
 class ProcessWin : public AbstractProcess {
 private:
-	WinProcess proc_;
+	BasicProcessWin proc_;
     bool started_ = false;
 	bool running_ = false;
 	int exit_code_ = -1;
@@ -29,7 +29,7 @@ public:
 
 class ProcessWinConPty : public AbstractProcess {
 private:
-	WinConPTY conpty_;
+	BasicProcessWinConPTY conpty_;
     bool started_ = false;
 	bool running_ = false;
 	int exit_code_ = -1;

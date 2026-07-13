@@ -11,20 +11,20 @@
 
 // 監督プロセスからConPTYワーカーを起動する。
 // hInputWrite_ -> ワーカーstdin、ワーカーstdout/stderr -> hOutputRead_ の双方向構成。
-class WinProcess {
+class BasicProcessWin {
 private:
 	struct Private;
 	Private *m;
 public:
-	WinProcess();
-	~WinProcess();
+	BasicProcessWin();
+	~BasicProcessWin();
 	bool exec(std::string const &cmd);
 	bool wait();
 	bool wait_for_output(std::string const &text);
 	void close_input();
 	bool write_input(char const *ptr, size_t n);
 	bool isRunning() const;
-	std::string getOutput() const;
+	std::string stdout_bytes() const;
 	int getExitCode() const;
 };
 
@@ -32,7 +32,7 @@ public:
 
 
 // ワーカープロセス内でConPTYを所有し、標準入出力とConPTYのパイプを中継する。
-class WinConPTY {
+class BasicProcessWinConPTY {
 public:
 	struct ExecResult {
 		bool started = false;
@@ -43,15 +43,15 @@ private:
 	struct Private;
 	Private *m;
 public:
-	WinConPTY();
-	~WinConPTY();
+	BasicProcessWinConPTY();
+	~BasicProcessWinConPTY();
 
 	bool exec(std::string const &cmd);
 	ExecResult wait();
 	void close_input();
 	bool write_input(char const *ptr, size_t n);
 	bool isRunning() const;
-	std::string getOutput() const;
+	std::string stdout_bytes() const;
 	int getExitCode() const;
 
 	static bool is_conpty_available();

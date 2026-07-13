@@ -23,7 +23,7 @@ int ProcessWin::wait()
 	}
 	proc_.wait();
 	running_ = false;
-	std::string out = proc_.getOutput();
+	std::string out = proc_.stdout_bytes();
 	stdout_bytes_.assign(out.begin(), out.end());
 	stderr_bytes_.clear();
 	exit_code_ = proc_.getExitCode();
@@ -37,7 +37,7 @@ void ProcessWin::stop()
 		proc_.close_input();
 		proc_.wait();
 		running_ = false;
-		std::string out = proc_.getOutput();
+		std::string out = proc_.stdout_bytes();
 		stdout_bytes_.assign(out.begin(), out.end());
 		stderr_bytes_.clear();
 		exit_code_ = proc_.getExitCode();
@@ -74,7 +74,7 @@ std::vector<char> const &ProcessWin::stdout_bytes() const
 {
 	std::lock_guard<std::mutex> lock(mutex_);
 	if (running_) {
-		std::string out = proc_.getOutput();
+		std::string out = proc_.stdout_bytes();
 		stdout_bytes_.assign(out.begin(), out.end());
 	}
 	return stdout_bytes_;
@@ -94,7 +94,7 @@ ProcessWinConPty::~ProcessWinConPty() = default;
 void ProcessWinConPty::start(const std::string &command, bool use_input)
 {
 	std::lock_guard<std::mutex> lock(mutex_);
-	if (!WinConPTY::is_conpty_available()) {
+	if (!BasicProcessWinConPTY::is_conpty_available()) {
 		started_ = false;
 		running_ = false;
 		return;
@@ -116,7 +116,7 @@ int ProcessWinConPty::wait()
 	}
 	auto result = conpty_.wait();
 	running_ = false;
-	std::string out = conpty_.getOutput();
+	std::string out = conpty_.stdout_bytes();
 	stdout_bytes_.assign(out.begin(), out.end());
 	stderr_bytes_.clear();
 	exit_code_ = result.exit_code;
@@ -130,7 +130,7 @@ void ProcessWinConPty::stop()
 		conpty_.close_input();
 		conpty_.wait();
 		running_ = false;
-		std::string out = conpty_.getOutput();
+		std::string out = conpty_.stdout_bytes();
 		stdout_bytes_.assign(out.begin(), out.end());
 		stderr_bytes_.clear();
 		exit_code_ = conpty_.getExitCode();
@@ -167,7 +167,7 @@ std::vector<char> const &ProcessWinConPty::stdout_bytes() const
 {
 	std::lock_guard<std::mutex> lock(mutex_);
 	if (running_) {
-		std::string out = conpty_.getOutput();
+		std::string out = conpty_.stdout_bytes();
 		stdout_bytes_.assign(out.begin(), out.end());
 	}
 	return stdout_bytes_;

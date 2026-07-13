@@ -232,9 +232,9 @@ private:
 
 }
 
-// WinProcess
+// BasicProcessWin
 
-struct WinProcess::Private {
+struct BasicProcessWin::Private {
 	struct D {
 		AutoHandle hInputWrite;
 		AutoHandle hOutputRead;
@@ -252,19 +252,19 @@ struct WinProcess::Private {
 	}
 };
 
-WinProcess::WinProcess()
+BasicProcessWin::BasicProcessWin()
 	: m(new Private)
 {
 }
 
-WinProcess::~WinProcess()
+BasicProcessWin::~BasicProcessWin()
 {
 	close_input();
 	wait();
 	delete m;
 }
 
-bool WinProcess::exec(const std::string &cmd)
+bool BasicProcessWin::exec(const std::string &cmd)
 {
 	if (IS_VALID_HANDLE(m->pi().hProcess) || IS_VALID_HANDLE(m->pi().hThread)) {
 		return false;
@@ -344,7 +344,7 @@ bool WinProcess::exec(const std::string &cmd)
 	return true;
 }
 
-bool WinProcess::wait()
+bool BasicProcessWin::wait()
 {
 	close_input();
 
@@ -368,7 +368,7 @@ bool WinProcess::wait()
 	return started;
 }
 
-bool WinProcess::wait_for_output(const std::string &text)
+bool BasicProcessWin::wait_for_output(const std::string &text)
 {
 	// プロンプトが複数回のReadFileに分割されても、連結済みoutput_から検索できる。
 	// ワーカーが先に終了した場合はoutput_closed_で待機を解除する。
@@ -379,14 +379,14 @@ bool WinProcess::wait_for_output(const std::string &text)
 	return m->d.output.find(text) != std::string::npos;
 }
 
-void WinProcess::close_input()
+void BasicProcessWin::close_input()
 {
 	if (IS_VALID_HANDLE(m->d.hInputWrite)) {
 		m->d.hInputWrite.close();
 	}
 }
 
-bool WinProcess::write_input(const char *ptr, size_t n)
+bool BasicProcessWin::write_input(const char *ptr, size_t n)
 {
 	if (IS_VALID_HANDLE(m->d.hInputWrite)) {
 		if (write_all(m->d.hInputWrite, ptr, n)) {
@@ -396,25 +396,25 @@ bool WinProcess::write_input(const char *ptr, size_t n)
 	return false;
 }
 
-bool WinProcess::isRunning() const
+bool BasicProcessWin::isRunning() const
 {
 	return IS_VALID_HANDLE(m->pi().hProcess) || IS_VALID_HANDLE(m->pi().hThread);
 }
 
-std::string WinProcess::getOutput() const
+std::string BasicProcessWin::stdout_bytes() const
 {
 	std::lock_guard<std::mutex> lock(m->output_mutex);
 	return m->d.output;
 }
 
-int WinProcess::getExitCode() const
+int BasicProcessWin::getExitCode() const
 {
 	return static_cast<int>(m->d.exit_code);
 }
 
-// WinConPTY
+// BasicProcessWinConPTY
 
-struct WinConPTY::Private {
+struct BasicProcessWinConPTY::Private {
 	struct D {
 		BOOL running = FALSE;
 		AutoProcessInformation pi;
@@ -423,7 +423,7 @@ struct WinConPTY::Private {
 		AutoHandle hPipeInWrite;
 		AutoHandle hPipeOutRead;
 		AutoHandle hPipeOutWrite;
-		WinConPTY::ExecResult result;
+		BasicProcessWinConPTY::ExecResult result;
 		std::string output;
 		bool output_closed = false;
 	} d;
@@ -433,18 +433,18 @@ struct WinConPTY::Private {
 	std::thread output_reader;
 };
 
-WinConPTY::WinConPTY()
+BasicProcessWinConPTY::BasicProcessWinConPTY()
 	: m(new Private)
 {
 }
 
-WinConPTY::~WinConPTY()
+BasicProcessWinConPTY::~BasicProcessWinConPTY()
 {
 	wait();
 	delete m;
 }
 
-bool WinConPTY::exec(const std::string &cmd)
+bool BasicProcessWinConPTY::exec(const std::string &cmd)
 {
 	m->d = {};
 
@@ -569,7 +569,7 @@ bool WinConPTY::exec(const std::string &cmd)
 	return true;
 }
 
-WinConPTY::ExecResult WinConPTY::wait()
+BasicProcessWinConPTY::ExecResult BasicProcessWinConPTY::wait()
 {
 	if (IS_VALID_HANDLE(m->d.pi->hProcess) || IS_VALID_HANDLE(m->d.pi->hThread)) {
 
@@ -600,14 +600,14 @@ WinConPTY::ExecResult WinConPTY::wait()
 	return ret;
 }
 
-void WinConPTY::close_input()
+void BasicProcessWinConPTY::close_input()
 {
 	if (m->d.hPipeInWrite) {
 		m->d.hPipeInWrite.close();
 	}
 }
 
-bool WinConPTY::write_input(const char *ptr, size_t n)
+bool BasicProcessWinConPTY::write_input(const char *ptr, size_t n)
 {
 	if (m->d.hPipeInWrite != nullptr) {
 		if (write_all(m->d.hPipeInWrite, ptr, static_cast<DWORD>(n))) {
@@ -617,23 +617,23 @@ bool WinConPTY::write_input(const char *ptr, size_t n)
 	return false;
 }
 
-bool WinConPTY::isRunning() const
+bool BasicProcessWinConPTY::isRunning() const
 {
 	return IS_VALID_HANDLE(m->d.pi->hProcess) || IS_VALID_HANDLE(m->d.pi->hThread);
 }
 
-std::string WinConPTY::getOutput() const
+std::string BasicProcessWinConPTY::stdout_bytes() const
 {
 	std::lock_guard<std::mutex> lock(m->output_mutex);
 	return m->d.output;
 }
 
-int WinConPTY::getExitCode() const
+int BasicProcessWinConPTY::getExitCode() const
 {
 	return static_cast<int>(m->d.result.exit_code);
 }
 
-bool WinConPTY::is_conpty_available()
+bool BasicProcessWinConPTY::is_conpty_available()
 {
 	HMODULE hKernel32 = GetModuleHandleW(L"kernel32.dll");
 	if (!hKernel32) return false;
