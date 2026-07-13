@@ -5,6 +5,7 @@
 #include <thread>
 #include <mutex>
 #include <condition_variable>
+#include <vector>
 
 // 監督プロセスからConPTYワーカーを起動する。
 // hInputWrite_ -> ワーカーstdin、ワーカーstdout/stderr -> hOutputRead_ の双方向構成。
@@ -48,5 +49,27 @@ public:
 	static bool is_conpty_available();
 };
 
+
+//
+class ProcessWinPty {
+private:
+	struct Private;
+	Private *m;
+
+	std::string exec_winpty(const std::string &cmd, const std::string &env, bool use_input);
+public:
+	ProcessWinPty();
+	~ProcessWinPty();
+	bool isRunning() const;
+	void writeInput(const char *ptr, int len);
+	void exec(const std::string &cmd, std::string const &env, bool use_input);
+	bool wait(unsigned long time = ULONG_MAX);
+	void stop();
+	int get_exit_code() const;
+	void readResult(std::vector<char> *out);
+	void close_input();
+
+	int read_output(char *ptr, int len);
+};
 
 #endif // WINPROCESS_H
