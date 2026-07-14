@@ -4,6 +4,7 @@
 #include <mutex>
 
 #ifdef _WIN32
+#include <io.h>
 #else
 #include <fcntl.h>
 #include <unistd.h>

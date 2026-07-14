@@ -19,8 +19,13 @@ class _AbstractBasicProcess {
 public:
 	struct ExecResult {
 		bool started = false;
+#ifdef _WIN32
+		DWORD exit_code = static_cast<DWORD>(-1);
+		DWORD error_code = ERROR_SUCCESS;
+#else
 		uint32_t exit_code = static_cast<uint32_t>(-1);
 		uint32_t error_code = 0; //ERROR_SUCCESS;
+#endif
 	};
 	virtual ~_AbstractBasicProcess() {}
 	virtual bool exec(std::string const &cmd) = 0;

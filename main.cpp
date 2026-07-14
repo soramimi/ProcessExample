@@ -119,7 +119,7 @@ int main(int argc, char **argv)
 	int worker_ret = ProcessConPtyWithWorker::run_worker(argc, argv);
 	if (worker_ret >= 0) return worker_ret;
 
-	int select = 4;
+	int select = 0;
 	switch (select) {
 	case 0:
 		main_basic_win(argc, argv);
