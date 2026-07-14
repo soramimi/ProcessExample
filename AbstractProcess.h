@@ -41,7 +41,7 @@ protected:
 	std::vector<char> output_vector_; // for result
 	std::vector<char> stdout_bytes_;
 	std::vector<char> stderr_bytes_;
-	void writeOutput(char const *buf, size_t len)
+	void write_output(char const *buf, size_t len)
 	{
 		output_queue_.insert(output_queue_.end(), buf, buf + len);
 		output_vector_.insert(output_vector_.end(), buf, buf + len);
@@ -49,8 +49,8 @@ protected:
 public:
 	virtual ~AbstractPtyProcess() {}
 
-	void setChangeDir(QString const &dir);
 #ifdef QT_VERSION
+	void setChangeDir(QString const &dir);
 	// void setCompletedHandler(std::function<void (bool, const QVariant &)> fn, QVariant const &userdata)
 	// {
 	// 	completed_fn_ = fn;
@@ -58,7 +58,7 @@ public:
 	// }
 #endif
 
-	void notifyCompleted()
+	void notify_completed()
 	{
 #ifdef QT_VERSION
 		if (completed_fn_) {

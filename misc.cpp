@@ -1,8 +1,12 @@
 #include "misc.h"
+
+#ifdef _WIN32
 #include <windows.h>
+#else
+#endif
 
 
-
+#ifdef _WIN32
 std::wstring misc::convert_str_to_wstr(const std::string_view &str)
 {
 	std::wstring wstr;
@@ -26,7 +30,20 @@ std::string misc::convert_wstr_to_str(const std::wstring &wstr)
 	}
 	return str;
 }
+#else
 
+std::u16string misc::convert_str_to_wstr(const std::string_view &str)
+{
+}
+
+std::string misc::convert_wstr_to_str(const std::u16string &wstr)
+{
+	
+}
+
+#endif
+
+#ifdef _WIN32
 /**
  * コマンドラインから実行ファイル名を抜き取る。
  * 例: "C:\Program Files\MyApp\app.exe" --option -> C:\Program Files\MyApp\app.exe
@@ -48,6 +65,7 @@ std::string misc::find_windows_openssh()
 	}
 	return result;
 }
+#endif
 
 std::string_view misc::getProgram(std::string_view cmdline)
 {

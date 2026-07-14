@@ -298,7 +298,7 @@ std::string ProcessWinPty::exec_winpty(const std::string &cmd, const std::string
 		DWORD n;
 		while (ReadFile(m->hConout, buf, sizeof(buf), &n, nullptr) && n > 0) {
 			std::lock_guard<std::mutex> lock(mutex_);
-			writeOutput(buf, n);
+			write_output(buf, n);
 		}
 		CloseHandle(m->hConout);
 	}

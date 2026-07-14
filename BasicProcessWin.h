@@ -3,18 +3,24 @@
 
 #include "AbstractProcess.h"
 
-#include <windows.h>
 #include <thread>
 #include <mutex>
 #include <condition_variable>
 #include <vector>
+#include <cstdint>
+
+#ifdef _WIN32
+#include <windows.h>
+#else
+#endif
+
 
 class _AbstractBasicProcess {
 public:
 	struct ExecResult {
 		bool started = false;
-		DWORD exit_code = static_cast<DWORD>(-1);
-		DWORD error_code = ERROR_SUCCESS;
+		uint32_t exit_code = static_cast<uint32_t>(-1);
+		uint32_t error_code = 0; //ERROR_SUCCESS;
 	};
 	virtual ~_AbstractBasicProcess() {}
 	virtual bool exec(std::string const &cmd) = 0;
@@ -65,6 +71,7 @@ public:
 	};
 	BasicProcessWinConPTY(Options const &options = Options());
 	~BasicProcessWinConPTY();
+	void set_options(Options const &options);
 
 	bool exec(std::string const &cmd);
 	ExecResult wait();

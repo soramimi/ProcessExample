@@ -476,13 +476,19 @@ struct BasicProcessWinConPTY::Private {
 BasicProcessWinConPTY::BasicProcessWinConPTY(Options const &options)
 	: m(new Private)
 {
-	m->options = options;
+	// m->options = options;
+	set_options(options);
 }
 
 BasicProcessWinConPTY::~BasicProcessWinConPTY()
 {
 	wait();
 	delete m;
+}
+
+void BasicProcessWinConPTY::set_options(const Options &options)
+{
+	m->options = options;
 }
 
 bool BasicProcessWinConPTY::exec(const std::string &cmd)

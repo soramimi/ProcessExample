@@ -1,13 +1,12 @@
 
-#ifndef _WIN32
-#error This code is for Windows only.
-#endif
+#include "BasicProcessPosix.h"
+#include "misc.h"
+#include <string>
 
+#ifdef _WIN32
 #include "ProcessConPtyWithWorker.h"
 #include "ProcessWin.h"
 #include "BasicProcessWin.h"
-#include "misc.h"
-#include <string>
 #include <windows.h>
 
 int main_win_conpty_with_worker(int /*argc*/, char ** /*argv*/)
@@ -110,7 +109,10 @@ int main_win_conpty(int /*argc*/, char ** /*argv*/)
 	puts(str.c_str());
 	return 0;
 }
+#else
+#endif
 
+#ifdef _WIN32
 int main(int argc, char **argv)
 {
 	// worker モードなら即座に実行して終了
@@ -142,3 +144,52 @@ int main(int argc, char **argv)
 	}
 	return 0;
 }
+#else
+
+int main_basic_posix(int argc, char **argv)
+{
+	std::string cmd = R"("/usr/bin/git")";
+	cmd += " --version";
+	// BasicProcessWin::Options opts;
+	// opts.output_vector = true;
+	PosixProcess proc;//(opts);
+	proc.start(cmd, false);
+	proc.wait();
+	auto vec = proc.stdout_bytes();
+	std::string_view view(vec.data(), vec.size());
+	std::string str = std::string(view);
+	puts(str.c_str());
+	return 0;
+}
+
+int main_basic_posix_pty(int argc, char **argv)
+{
+	std::string cmd = R"("/usr/bin/git")";
+	cmd += " --version";
+	// BasicProcessWin::Options opts;
+	// opts.output_vector = true;
+	PosixPtyProcess proc;//(opts);
+	proc.start(cmd, {}, false);
+	proc.wait();
+	auto vec = proc.stdout_bytes();
+	std::string_view view(vec.data(), vec.size());
+	std::string str = std::string(view);
+	puts(str.c_str());
+	return 0;
+}
+
+int main(int argc, char **argv)
+{
+	int select = 0;
+	switch (select) {
+	case 0:
+		main_basic_posix(argc, argv);
+		break;
+	case 1:
+		main_basic_posix_pty(argc, argv);
+		break;
+	}
+	return 0;	
+}
+#endif
+

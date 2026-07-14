@@ -10,14 +10,21 @@ win32:DEFINES += NOMINMAX
 
 HEADERS += main.h \
 	AbstractProcess.h \
-	BasicProcessWin.h \
-	ProcessWin.h \
-	ProcessConPtyWithWorker.h \
+	BasicProcessPosix.h \
 	base64.h \
 	misc.h
+	
 SOURCES += main.cpp \
 	AbstractProcess.cpp \
-	BasicProcessWin.cpp \
-	ProcessWin.cpp \
-	ProcessConPtyWithWorker.cpp \
+	BasicProcessPosix.cpp \
 	misc.cpp
+
+win32:HEADERS += \
+	BasicProcessWin.h \
+	ProcessConPtyWithWorker.h \
+	ProcessWin.h
+
+win32:SOURCES += \
+	BasicProcessWin.cpp \
+	ProcessConPtyWithWorker.cpp \
+	ProcessWin.cpp

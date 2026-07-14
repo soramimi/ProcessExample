@@ -1,11 +1,11 @@
 #include "AbstractProcess.h"
 
+#ifdef QT_VERSION
 void AbstractPtyProcess::setChangeDir(QString const &dir)
 {
-#ifdef QT_VERSION
 	change_dir_ = dir;
-#endif
 }
+#endif
 
 std::string AbstractPtyProcess::getMessage() const // deprecated
 {
