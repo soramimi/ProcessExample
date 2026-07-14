@@ -7,6 +7,7 @@
 #include <io.h>
 #else
 #include <atomic>
+#include <cerrno>
 #include <csignal>
 #include <cstdio>
 #include <fcntl.h>
@@ -86,7 +87,7 @@ public:
 	std::deque<char> errq;
 	bool use_input = false;
 	int fd_in_read = -1;
-	int pid = 0;
+	std::atomic<pid_t> pid{0};
 	int exit_code = -1;
 	bool close_input_later = false;
 protected:
@@ -123,7 +124,7 @@ protected:
 		char const *error_message;
 		int fd_out_write;
 		int fd_err_write;
-		int pid;
+		pid_t child_pid;
 
 		if (pipe(stdin_pipe) < 0) {
 			error_message = "failed: pipe";
@@ -140,13 +141,13 @@ protected:
 			goto fail;
 		}
 
-		pid = fork();
-		if (pid < 0) {
+		child_pid = fork();
+		if (child_pid < 0) {
 			error_message = "failed: fork";
 			goto fail;
 		}
 
-		if (pid == 0) { // child
+		if (child_pid == 0) { // child
 			setenv("LANG", "C", 1);
 			close(stdin_pipe[W]);
 			close(stdout_pipe[R]);
@@ -167,6 +168,7 @@ protected:
 				_exit(127);
 			}
 		}
+		pid = child_pid;
 
 		close(stdin_pipe[R]);
 		close(stdout_pipe[W]);
@@ -190,15 +192,18 @@ protected:
 			while (1) {
 				std::this_thread::sleep_for(std::chrono::milliseconds(1));
 				int status = 0;
-				if (waitpid(pid, &status, WNOHANG) == pid) {
+				pid_t wait_result = waitpid(child_pid, &status, WNOHANG);
+				if (wait_result == child_pid) {
 					if (WIFEXITED(status)) {
 						exit_code = WEXITSTATUS(status);
 						break;
 					}
 					if (WIFSIGNALED(status)) {
-						exit_code = -1;
+						exit_code = 128 + WTERMSIG(status);
 						break;
 					}
+				} else if (wait_result < 0 && errno != EINTR) {
+					break;
 				}
 				{
 					std::lock_guard<std::mutex> lock(*mutex);
@@ -211,9 +216,8 @@ protected:
 								l = sizeof(tmp);
 							}
 							std::copy(inq.begin(), inq.begin() + l, tmp);
-							inq.erase(inq.begin(), inq.begin() + l);
 							if (fd_in_read != -1) {
-								int r = write(fd_in_read, tmp, l);
+								ssize_t r = write(fd_in_read, tmp, l);
 								if (r < 0) {
 									// 子プロセスが標準入力を閉じている（またはすでに終了した）。
 									// これ以上書き込めないので入力側を閉じて諦める。
@@ -221,8 +225,12 @@ protected:
 									inq.clear();
 									break;
 								}
+								inq.erase(inq.begin(), inq.begin() + r);
+								n -= static_cast<int>(r);
+								continue;
 							}
-							n -= l;
+							inq.clear();
+							break;
 						}
 					} else if (close_input_later) {
 						closeInput();
@@ -236,6 +244,7 @@ protected:
 
 		close(fd_out_write);
 		close(fd_err_write);
+		pid = 0;
 		return;
 
 	fail:
@@ -249,6 +258,7 @@ protected:
 		if (stderr_pipe[R] >= 0) close(stderr_pipe[R]);
 		if (stderr_pipe[W] >= 0) close(stderr_pipe[W]);
 		fd_in_read = -1;
+		pid = 0;
 		exit_code = -1;
 		fprintf(stderr, "%s\n", error_message);
 	}
@@ -256,10 +266,12 @@ public:
 	UnixProcessThread() = default;
 	~UnixProcessThread()
 	{
+		terminate();
 		stop();
 	}
 	void writeInput(char const *ptr, int len)
 	{
+		if (!mutex || !ptr || len <= 0) return;
 		std::lock_guard<std::mutex> lock(*mutex);
 		inq.insert(inq.end(), ptr, ptr + len);
 	}
@@ -277,6 +289,12 @@ public:
 		thread = std::thread([this](){
 			run();
 		});
+	}
+	void terminate()
+	{
+		pid_t child_pid = pid.load();
+		if (child_pid > 0) kill(child_pid, SIGTERM);
+		closeInput();
 	}
 	void stop()
 	{
@@ -347,6 +365,8 @@ void PosixProcess::parseArgs(std::string const &cmd, std::vector<std::string> *o
 
 void PosixProcess::start(std::string const &command, bool use_input)
 {
+	if (is_running()) return;
+	exit_code_ = -1;
 	parseArgs(command, &m->th.argvec);
 	if (!m->th.argvec.empty()) {
 		for (std::string const &s : m->th.argvec) {
@@ -413,6 +433,7 @@ std::optional<std::string> PosixProcess::run_and_wait(const std::string &command
 
 void PosixProcess::stop()
 {
+	m->th.terminate();
 	wait();
 }
 
@@ -477,7 +498,7 @@ struct PosixPtyProcess::Private {
 	std::thread thread;
 	std::string command;
 	std::string env;
-	int pty_master;
+	int pty_master = -1;
 	int exit_code = -1;
 };
 
@@ -500,8 +521,16 @@ bool PosixPtyProcess::is_running() const
 
 void PosixPtyProcess::write_input(char const *ptr, int len)
 {
-	int r = write(m->pty_master, ptr, len);
-	(void)r;
+	if (!ptr || len <= 0) return;
+	std::lock_guard<std::mutex> lock(m->mutex);
+	if (m->pty_master < 0) return;
+	while (len > 0) {
+		ssize_t written = write(m->pty_master, ptr, static_cast<size_t>(len));
+		if (written < 0 && errno == EINTR) continue;
+		if (written <= 0) break;
+		ptr += written;
+		len -= static_cast<int>(written);
+	}
 }
 
 int PosixPtyProcess::read_output(char *ptr, int len)
@@ -526,6 +555,9 @@ void PosixPtyProcess::start(std::string const &cmd, std::string const &env, bool
 	if (is_running()) return;
 	m->command = cmd;
 	m->env = env;
+	m->interrupted = false;
+	m->exit_code = -1;
+	if (cmd.empty()) return;
 	// QThread::start();
 	m->thread = std::thread([this](){
 		run();
@@ -552,8 +584,8 @@ int PosixPtyProcess::wait()
 
 void PosixPtyProcess::run()
 {
-	struct termios orig_termios;
-	struct winsize orig_winsize;
+	struct termios orig_termios = {};
+	struct winsize orig_winsize = {25, 80, 0, 0};
 	
 	// TraceLogger trace;
 	// trace.begin("process", QString::fromStdString(m->command));
@@ -623,6 +655,7 @@ void PosixPtyProcess::run()
 		strcpy(command, m->command.c_str());
 		std::vector<char *> argv;
 		make_argv(command, &argv);
+		if (argv.empty()) _exit(127);
 		argv.push_back(nullptr);
 		execvp(argv[0], &argv[0]);
 
@@ -637,6 +670,7 @@ void PosixPtyProcess::run()
 	} else {
 		
 		bool ok = false;
+		bool child_reaped = false;
 		
 		while (1) {
 			// if (isInterruptionRequested()) break;
@@ -645,12 +679,14 @@ void PosixPtyProcess::run()
 			int r = waitpid(pid, &status, WNOHANG);
 			if (r < 0) break;
 			if (r > 0) {
+				child_reaped = true;
 				if (WIFEXITED(status)) {
 					m->exit_code = WEXITSTATUS(status);
 					ok = true;
 					break;
 				}
 				if (WIFSIGNALED(status)) {
+					m->exit_code = 128 + WTERMSIG(status);
 					break;
 				}
 			}
@@ -678,7 +714,12 @@ void PosixPtyProcess::run()
 			}
 		}
 		
-		kill(pid, SIGTERM);
+		if (!child_reaped) {
+			kill(pid, SIGTERM);
+			int status = 0;
+			while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
+			if (WIFSIGNALED(status)) m->exit_code = 128 + WTERMSIG(status);
+		}
 		close(m->pty_master);
 		m->pty_master = -1;
 		

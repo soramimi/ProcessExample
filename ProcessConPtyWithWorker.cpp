@@ -2,6 +2,7 @@
 #include "base64.h"
 #include "misc.h"
 #include <windows.h>
+#include <algorithm>
 
 ProcessConPtyWithWorker::ProcessConPtyWithWorker()
 {
@@ -18,7 +19,14 @@ int ProcessConPtyWithWorker::run_worker(int argc, char **argv)
 	if (argc == 3) {
 		std::string_view arg = argv[1];
 		if (arg == subprocess_tag) {
-			std::string cmd = base64_decode(argv[2]);
+			std::vector<char> decoded;
+			std::string_view encoded = argv[2];
+			if (!Base64::decode_checked(encoded.data(), encoded.size(), &decoded)
+				|| decoded.empty()
+				|| std::find(decoded.begin(), decoded.end(), '\0') != decoded.end()) {
+				return 128;
+			}
+			std::string cmd(decoded.data(), decoded.size());
 			BasicProcessWinConPTY::Options opts;
 			opts.output_stdout = true;
 			BasicProcessWinConPTY conpty(opts);
@@ -43,11 +51,17 @@ void ProcessConPtyWithWorker::start(const std::string &command, const std::strin
 		return;
 	}
 
-	char tmp[_MAX_PATH];
-	memset(tmp, 0, sizeof(tmp));
-	GetModuleFileNameA(NULL, tmp, _countof(tmp));
+	wchar_t tmp[32768];
+	DWORD length = GetModuleFileNameW(nullptr, tmp, _countof(tmp));
+	if (length == 0 || length >= _countof(tmp)) {
+		started_ = false;
+		running_ = false;
+		exit_code_ = -1;
+		return;
+	}
 
-	std::string cmd = "\"" + std::string(tmp) + "\"";
+	std::string executable = misc::convert_wstr_to_str(std::wstring(tmp, length));
+	std::string cmd = "\"" + executable + "\"";
 	cmd += ' ' + std::string(subprocess_tag) + ' ' + base64_encode(command);
 
 	started_ = proc_.exec(cmd);

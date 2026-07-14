@@ -9,8 +9,7 @@ win32:LIBS += -L$$PWD\winpty\x64\lib -lwinpty
 
 win32:DEFINES += NOMINMAX
 
-HEADERS += main.h \
-	AbstractProcess.h \
+HEADERS += AbstractProcess.h \
 	base64.h \
 	misc.h
 	

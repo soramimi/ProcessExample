@@ -103,13 +103,13 @@ class AbstractPtyProcess {
 };
 ```
 
-- `stdout_bytes()` は実行中でも呼べるよう、内部バッファを逐次更新する。`const` メソッドだが `mutable` なキャッシュを更新するラッパー実装がある。
+- `stdout_bytes()` の確定結果は基本的に `wait()` 後に取得する。実行中の逐次出力を扱う用途には `read_output()`（キュー）または `wait_for_output()` を使う。ラッパー側の結果キャッシュには `mutable` なメンバーを持つ実装がある。
 
 ## ProcessConPtyWithWorker の動作フロー
 
 1. **エントリポイント (`main`)**:
    - まず `ProcessConPtyWithWorker::run_worker(argc, argv)` を呼び出す。`--conpty-subprocess--` 引数があればワーカーモード。
-   - ワーカーモード: Base64 デコードしたコマンドを `BasicProcessWinConPTY` で実行し、終了コードを返して即終了。
+   - ワーカーモード: Base64 を厳密に検証・デコードし、空コマンドや NUL 混入を拒否してから `BasicProcessWinConPTY` で実行する。不正な worker 引数や起動失敗は終了コード `128`、起動後は子プロセスの終了コードを返して即終了。
    - 監督モード: `main_win_conpty_with_worker` へ進む。
 
 2. **監督モード**:
@@ -132,6 +132,8 @@ class AbstractPtyProcess {
 - **VT シーケンス**: `BasicProcessWinConPTY` の出力スレッド内で `VtStripper` が状態を保持しつつ除去する。`ReadFile` のチャンク境界をまたぐシーケンスにも対応。
 - **POSIX 対応**: `BasicProcessPosix.h/cpp` に `PosixProcess`（パイプ）/ `PosixPtyProcess`（疑似端末）を追加し、Linux/macOS でもビルド・実行できるようにした。`main.cpp` は `#ifdef _WIN32` で Windows 版 `main` と POSIX 版 `main`（`main_basic_posix` / `main_basic_posix_pty` を切り替え）を分離している。`process-example.pro` は `win32:` スコープを使い、Windows 専用ソース（`BasicProcessWin.*` 等）と共通ソース（`BasicProcessPosix.*` 等）を分けてビルドする。
 - **POSIX 側の制約**: `PosixPtyProcess` は VT ストリッピングを行わない（生の PTY 出力をそのまま返す）。`misc::convert_str_to_wstr` / `convert_wstr_to_str` の POSIX 版は未実装（空実装）。`PosixProcess::parseArgs` / POSIX 側 `make_argv` は Windows 側と別実装で、コマンドライン解析ロジックが重複している。
+- **POSIX の停止**: `PosixProcess::stop()` は子プロセスへ `SIGTERM` を送り、stdin を閉じてから終了を待つ。シグナル終了コードはシェル慣例に合わせて `128 + signal` とする。`PosixPtyProcess` も中断時に子を terminate して `waitpid()` で回収する。
+- **検証環境**: 最新の堅牢化変更は Windows（MSVC/qmake/nmake）でビルド・実行確認済み。今回のホストには WSL ディストリビューションがないため、項目10の POSIX 追加変更は Linux/macOS での再ビルド確認が必要。
 
 ## 変更履歴（このセッションで実施）
 
@@ -151,6 +153,15 @@ class AbstractPtyProcess {
    - `PosixProcess::get_exit_code()` が `wait()` 後は常に `-1`（内部状態のリセットで終了コードを喪失）を返していたのを、`wait()` 側でキャッシュするよう修正。
    - `AbstractProcess.h` に不足していた `#include <string>` / `<vector>`、`BasicProcessPosix.cpp` に不足していた `#include <atomic>` を追加（`-std=c++17` 明示時のみ顕在化するビルド失敗だった。macOS の libc++ 等でも壊れる可能性があったため、`process-example.pro` に `CONFIG += c++17` を追加して常にこの水準でコンパイルされるようにした）。
    - `misc::convert_str_to_wstr`/`convert_wstr_to_str` の POSIX版が空の関数本体で戻り値なし（未定義動作）だったのを、明示的に空値を返すよう修正（現状 POSIX 側からの呼び出しはなく、未実装であることをコメントで明記）。
+10. **入力検証、終了コード、停止処理を追加で堅牢化。** セキュリティと異常系を再監査し、以下を修正:
+   - `base64.h` のデコーダーが空入力や入力終端で範囲外参照し得たため、長さ境界を守る厳密なデコード処理へ変更。不正文字、不正パディング、不完全な quartet を拒否し、空/null の `std::vector` ラッパーも安全に扱う。
+   - ConPTY worker のコマンド引数について、Base64 の妥当性、空コマンド、デコード結果中の NUL を検査。不正入力は子プロセスを起動せず終了コード `128` で拒否する。
+   - worker が自分自身を再起動する際のパス取得を `GetModuleFileNameA` と `_MAX_PATH` 固定バッファから `GetModuleFileNameW` と長い Unicode パス対応バッファへ変更。
+   - `BasicProcessWin::wait()` が取得した終了コードを状態リセット後の値で上書きしていた問題、および `BasicProcessWin` / `BasicProcessWinConPTY` の `get_exit_code()` が `wait()` 後に終了コードを失う問題を、最終終了コードのキャッシュで修正。
+   - Windows 匿名パイプの非継承設定 (`SetHandleInformation`) の失敗を検査し、空コマンドを起動前に拒否するよう変更。
+   - POSIX パイプ入力の部分 `write()` で未送信データまでキューから削除していた問題を修正。`waitpid()` の `EINTR`/失敗、シグナル終了、明示的な `stop()` を処理し、子 PID を安全に追跡する。
+   - POSIX PTY の master fd と端末サイズを初期化し、空コマンドを拒否。部分 write/EINTR に対応し、回収済み PID へ再度 `kill()` し得た処理を修正して、必要な場合だけ terminate と reap を行う。
+   - 削除済み `main.h` が残っていた `process-example.pro` の `HEADERS` エントリを削除。
 
 ## 参考
 

@@ -4,6 +4,8 @@
 
 #include <vector>
 #include <string>
+#include <cctype>
+#include <cstring>
 
 class Base64 {
 private:
@@ -35,6 +37,47 @@ private:
 		return table[c & 127];
 	}
 public:
+	static bool decode_checked(char const *src, size_t length, std::vector<char> *out)
+	{
+		out->clear();
+		if (!src && length != 0) return false;
+
+		unsigned char quartet[4];
+		size_t count = 0;
+		bool finished = false;
+		for (size_t i = 0; i < length; ++i) {
+			unsigned char ch = static_cast<unsigned char>(src[i]);
+			if (std::isspace(ch)) continue;
+			if (finished) return false;
+			if (ch == PAD) {
+				quartet[count++] = 0x40;
+			} else {
+				if (ch >= 0x80) return false;
+				unsigned char value = dec(ch);
+				if (value >= 0x40) return false;
+				quartet[count++] = value;
+			}
+			if (count != 4) continue;
+
+			if (quartet[0] >= 0x40 || quartet[1] >= 0x40) return false;
+			if (quartet[2] == 0x40 && quartet[3] != 0x40) return false;
+			out->push_back(static_cast<char>((quartet[0] << 2) | (quartet[1] >> 4)));
+			if (quartet[2] != 0x40) {
+				out->push_back(static_cast<char>((quartet[1] << 4) | (quartet[2] >> 2)));
+				if (quartet[3] != 0x40) {
+					out->push_back(static_cast<char>((quartet[2] << 6) | quartet[3]));
+				}
+			}
+			finished = quartet[2] == 0x40 || quartet[3] == 0x40;
+			count = 0;
+		}
+		if (count != 0) {
+			out->clear();
+			return false;
+		}
+		return true;
+	}
+
 	static void encode(char const *src, size_t length, std::vector<char> *out)
 	{
 		size_t srcpos, dstlen, dstpos;
@@ -69,49 +112,7 @@ public:
 
 	static void decode(char const *src, size_t length, std::vector<char> *out)
 	{
-		unsigned char const *begin = (unsigned char const *)src;
-		unsigned char const *end = begin + length;
-		unsigned char const *ptr = begin;
-		out->clear();
-		out->reserve(length * 3 / 4);
-		int count = 0;
-		int bits = 0;
-		while (1) {
-			if (isspace(*ptr)) {
-				ptr++;
-			} else {
-				unsigned char c = 0xff;
-				if (ptr < end && *ptr < 0x80) {
-					c = dec(*ptr);
-				}
-				if (c < 0x40) {
-					bits = (bits << 6) | c;
-					count++;
-				} else {
-					if (count < 4) {
-						bits <<= (4 - count) * 6;
-					}
-					c = 0xff;
-				}
-				if (count == 4 || c == 0xff) {
-					if (count >= 2) {
-						out->push_back(bits >> 16);
-						if (count >= 3) {
-							out->push_back(bits >> 8);
-							if (count == 4) {
-								out->push_back(bits);
-							}
-						}
-					}
-					count = 0;
-					bits = 0;
-					if (c == 0xff) {
-						break;
-					}
-				}
-				ptr++;
-			}
-		}
+		(void)decode_checked(src, length, out);
 	}
 
 	static std::string _to_s_(std::vector<char> const *vec)
@@ -133,12 +134,20 @@ static inline void base64_decode(char const *src, size_t length, std::vector<cha
 
 static inline void base64_encode(std::vector<char> const *src, std::vector<char> *out)
 {
-	Base64::encode(&src->at(0), src->size(), out);
+	if (!src) {
+		out->clear();
+		return;
+	}
+	Base64::encode(src->data(), src->size(), out);
 }
 
 static inline void base64_decode(std::vector<char> const *src, std::vector<char> *out)
 {
-	Base64::decode(&src->at(0), src->size(), out);
+	if (!src) {
+		out->clear();
+		return;
+	}
+	Base64::decode(src->data(), src->size(), out);
 }
 
 static inline void base64_encode(char const *src, std::vector<char> *out)

@@ -250,6 +250,7 @@ struct BasicProcessWin::Private {
 	std::thread output_reader;
 	std::mutex output_mutex;
 	std::condition_variable output_changed;
+	DWORD last_exit_code = static_cast<DWORD>(-1);
 	PROCESS_INFORMATION &pi()
 	{
 		return *&d.pi;
@@ -276,6 +277,7 @@ void BasicProcessWin::set_options(Options const &options)
 
 bool BasicProcessWin::exec(const std::string &cmd)
 {
+	if (cmd.empty()) return false;
 	if (IS_VALID_HANDLE(m->pi().hProcess) || IS_VALID_HANDLE(m->pi().hThread)) {
 		return false;
 	}
@@ -301,8 +303,12 @@ bool BasicProcessWin::exec(const std::string &cmd)
 		m->d = {};
 		return false;
 	}
-	SetHandleInformation(m->d.hInputWrite, HANDLE_FLAG_INHERIT, 0);
-	SetHandleInformation(m->d.hOutputRead, HANDLE_FLAG_INHERIT, 0);
+	if (!SetHandleInformation(m->d.hInputWrite, HANDLE_FLAG_INHERIT, 0)
+		|| !SetHandleInformation(m->d.hOutputRead, HANDLE_FLAG_INHERIT, 0)) {
+		m->d.result.error_code = GetLastError();
+		m->d = {};
+		return false;
+	}
 
 	STARTUPINFOW si = {};
 	si.cb = sizeof(si);
@@ -384,8 +390,8 @@ _AbstractBasicProcess::ExecResult BasicProcessWin::wait()
 	m->output_bytes = std::move(m->d.output_vector);
 
 	auto ret = std::move(m->d.result);
+	m->last_exit_code = ret.exit_code;
 	m->d = {};
-	ret.exit_code = m->d.exit_code;
 	return ret;
 }
 
@@ -446,7 +452,7 @@ std::vector<char> const &BasicProcessWin::stdout_bytes() const
 
 int BasicProcessWin::get_exit_code() const
 {
-	return static_cast<int>(m->d.exit_code);
+	return static_cast<int>(m->last_exit_code);
 }
 
 // BasicProcessWinConPTY
@@ -471,6 +477,7 @@ struct BasicProcessWinConPTY::Private {
 	std::atomic<bool> stop_input{false};
 	std::thread input_writer;
 	std::thread output_reader;
+	DWORD last_exit_code = static_cast<DWORD>(-1);
 };
 
 BasicProcessWinConPTY::BasicProcessWinConPTY(Options const &options)
@@ -493,6 +500,7 @@ void BasicProcessWinConPTY::set_options(const Options &options)
 
 bool BasicProcessWinConPTY::exec(const std::string &cmd)
 {
+	if (cmd.empty()) return false;
 	m->d = {};
 
 	// ConPTYから見た入力用と出力用の2本の匿名パイプを用意する。
@@ -657,6 +665,7 @@ BasicProcessWinConPTY::ExecResult BasicProcessWinConPTY::wait()
 	m->output_bytes = std::move(m->d.output_vector);
 
 	auto ret = std::move(m->d.result);
+	m->last_exit_code = ret.exit_code;
 	m->d = {};
 	return ret;
 }
@@ -704,7 +713,7 @@ std::vector<char> const &BasicProcessWinConPTY::stdout_bytes() const
 
 int BasicProcessWinConPTY::get_exit_code() const
 {
-	return static_cast<int>(m->d.result.exit_code);
+	return static_cast<int>(m->last_exit_code);
 }
 
 bool BasicProcessWinConPTY::is_conpty_available()
