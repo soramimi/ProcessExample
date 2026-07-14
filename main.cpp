@@ -5,7 +5,7 @@
 
 #include "ProcessConPtyWithWorker.h"
 #include "ProcessWin.h"
-#include "WinProcess.h"
+#include "BasicProcessWin.h"
 #include "misc.h"
 #include <string>
 #include <windows.h>
@@ -23,13 +23,13 @@ int main_win_conpty_with_worker(int /*argc*/, char ** /*argv*/)
 	std::string cmd = "git -c core.sshCommand=\"" + ssh + "\" " + gitcmd;
 
 	ProcessConPtyWithWorker proc;
-	proc.start(cmd, false);
+	proc.start(cmd, {}, true);
 
 	std::string prompt = "Are you sure you want to continue connecting";
 	if (proc.wait_for_output(prompt)) {
-		proc.writeInput("no\n", 3);
+		proc.write_input("no\n", 3);
 	}
-	proc.closeInput(false);
+	proc.close_input();
 	proc.wait();
 	return 0;
 }
@@ -57,7 +57,7 @@ int main_winpty(int /*argc*/, char ** /*argv*/)
 	proc.wait();
 	{
 		char tmp[1024];
-		int len = proc.readOutput(tmp, sizeof(tmp) - 1);
+		int len = proc.read_output(tmp, sizeof(tmp) - 1);
 		tmp[len] = 0;
 		puts(tmp);
 	}
@@ -68,7 +68,9 @@ int main_basic_win(int /*argc*/, char ** /*argv*/)
 {
 	std::string cmd = R"("C:\Program Files\Git\cmd\git.exe")";
 	cmd += " --version";
-	BasicProcessWin proc;
+	BasicProcessWin::Options opts;
+	opts.output_vector = true;
+	BasicProcessWin proc(opts);
 	proc.exec(cmd);
 	proc.wait();
 	auto vec = proc.stdout_bytes();
@@ -82,7 +84,9 @@ int main_basic_win_conpty(int /*argc*/, char ** /*argv*/)
 {
 	std::string cmd = R"("C:\Program Files\Git\cmd\git.exe")";
 	cmd += " --version";
-	BasicProcessWinConPTY proc;
+	BasicProcessWinConPTY::Options opts;
+	opts.output_vector = true;
+	BasicProcessWinConPTY proc(opts);
 	proc.exec(cmd);
 	proc.wait();
 	auto vec = proc.stdout_bytes();
@@ -98,7 +102,7 @@ int main_win_conpty(int /*argc*/, char ** /*argv*/)
 	std::string cmd = R"("C:\Program Files\Git\cmd\git.exe")";
 	cmd += " --version";
 	ProcessWinConPty proc;
-	proc.start(cmd, false);
+	proc.start(cmd, {}, false);
 	proc.wait();
 	auto vec = proc.stdout_bytes();
 	std::string_view view(vec.data(), vec.size());

@@ -2,18 +2,19 @@
 #define PROCESSCONPTYWITHWORKER_H
 
 #include "AbstractProcess.h"
-#include "WinProcess.h"
+#include "BasicProcessWin.h"
 
 #include <string>
 #include <vector>
 #include <mutex>
 
-class ProcessConPtyWithWorker : public AbstractProcess {
+class ProcessConPtyWithWorker : public AbstractPtyProcess {
 public:
 	static int run_worker(int argc, char **argv);
 	bool wait_for_output(std::string const &text);
 
 private:
+	static constexpr std::string_view subprocess_tag = "--conpty-subprocess--";
 	BasicProcessWin proc_;
 	bool started_ = false;
 	bool running_ = false;
@@ -26,15 +27,17 @@ public:
 	ProcessConPtyWithWorker();
 	~ProcessConPtyWithWorker() override;
 
-	void start(const std::string &command, bool use_input) override;
+	void start(const std::string &command, std::string const &env, bool use_input) override;
 	int wait() override;
 	void stop() override;
-	bool isRunning() const override;
-	int getExitCode() const override;
-	void writeInput(char const *ptr, int len) override;
-	void closeInput(bool justnow) override;
-	std::vector<char> const &stdout_bytes() const override;
-	std::vector<char> const &stderr_bytes() const override;
+	bool is_running() const override;
+	int get_exit_code() const override;
+	void write_input(char const *ptr, int len) override;
+	int read_output(char *ptr, int len);
+	void close_input() override;
+
+	// std::vector<char> const &stdout_bytes() const;
+	// std::vector<char> const &stderr_bytes() const;
 };
 
 #endif // PROCESSCONPTYWITHWORKER_H

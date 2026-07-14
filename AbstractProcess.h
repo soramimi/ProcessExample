@@ -17,11 +17,11 @@ public:
 	virtual void start(const std::string &command, bool use_input) = 0;
 	virtual int wait() = 0;
 	virtual void stop() = 0;
-	virtual bool isRunning() const = 0;
-	virtual int getExitCode() const = 0;
-	virtual void writeInput(char const *ptr, int len) = 0;
+	virtual bool is_running() const = 0;
+	virtual int get_exit_code() const = 0;
+	virtual void write_input(char const *ptr, int len) = 0;
 
-	virtual void closeInput(bool justnow) = 0;
+	virtual void close_input() = 0;
 
 	virtual std::vector<char> const &stdout_bytes() const = 0;
 	virtual std::vector<char> const &stderr_bytes() const = 0;
@@ -80,12 +80,13 @@ public:
 	}
 
 	virtual void start(std::string const &cmd, std::string const &env, bool use_input) = 0;
-	virtual bool wait(unsigned long time = ULONG_MAX) = 0;
+	virtual int wait() = 0;
 	virtual void stop() = 0;
-	virtual bool isRunning() const = 0;
-	virtual int getExitCode() const = 0;
-	virtual void writeInput(char const *ptr, int len) = 0;
-	virtual int readOutput(char *ptr, int len) = 0;
+	virtual bool is_running() const = 0;
+	virtual int get_exit_code() const = 0;
+	virtual void write_input(char const *ptr, int len) = 0;
+	virtual int read_output(char *ptr, int len) = 0;
+	virtual void close_input() = 0;
 };
 
 #endif // ABSTRACTPROCESS_H

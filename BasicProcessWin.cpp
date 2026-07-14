@@ -1,6 +1,5 @@
-#include "WinProcess.h"
+#include "BasicProcessWin.h"
 #include "misc.h"
-#include <winpty.h>
 #include <thread>
 #include <mutex>
 #include <condition_variable>
@@ -235,14 +234,19 @@ private:
 // BasicProcessWin
 
 struct BasicProcessWin::Private {
+	BasicProcessWin::Options options;
 	struct D {
 		AutoHandle hInputWrite;
 		AutoHandle hOutputRead;
 		AutoProcessInformation pi;
-		std::string output;
+		std::deque<char> output_queue;
+		std::vector<char> output_vector;
+		std::string output_bytes;
 		bool output_closed = false;
 		DWORD exit_code = static_cast<DWORD>(-1);
+		_AbstractBasicProcess::ExecResult result;
 	} d;
+	std::vector<char> output_bytes;
 	std::thread output_reader;
 	std::mutex output_mutex;
 	std::condition_variable output_changed;
@@ -252,9 +256,10 @@ struct BasicProcessWin::Private {
 	}
 };
 
-BasicProcessWin::BasicProcessWin()
+BasicProcessWin::BasicProcessWin(BasicProcessWin::Options const &options)
 	: m(new Private)
 {
+	set_options(options);
 }
 
 BasicProcessWin::~BasicProcessWin()
@@ -264,6 +269,11 @@ BasicProcessWin::~BasicProcessWin()
 	delete m;
 }
 
+void BasicProcessWin::set_options(Options const &options)
+{
+	m->options = options;
+}
+
 bool BasicProcessWin::exec(const std::string &cmd)
 {
 	if (IS_VALID_HANDLE(m->pi().hProcess) || IS_VALID_HANDLE(m->pi().hThread)) {
@@ -271,7 +281,6 @@ bool BasicProcessWin::exec(const std::string &cmd)
 	}
 	{
 		std::lock_guard<std::mutex> lock(m->output_mutex);
-		m->d.output.clear();
 		m->d.output_closed = false;
 	}
 
@@ -328,11 +337,18 @@ bool BasicProcessWin::exec(const std::string &cmd)
 		while (ReadFile(m->d.hOutputRead, buf, sizeof(buf), &n, nullptr) && n > 0) {
 			{
 				std::lock_guard<std::mutex> lock(m->output_mutex);
-				m->d.output.append(buf, n);
+				if (m->options.output_vector) {
+					m->d.output_vector.insert(m->d.output_vector.end(), buf, buf + n);
+				}
+				if (m->options.output_queue) {
+					m->d.output_queue.insert(m->d.output_queue.end(), buf, buf + n);
+				}
 			}
 			m->output_changed.notify_all();
-			DWORD written = 0;
-			WriteFile(hStdOutput, buf, n, &written, nullptr);
+			if (m->options.output_stdout) {
+				DWORD written = 0;
+				WriteFile(hStdOutput, buf, n, &written, nullptr);
+			}
 		}
 		{
 			std::lock_guard<std::mutex> lock(m->output_mutex);
@@ -344,16 +360,16 @@ bool BasicProcessWin::exec(const std::string &cmd)
 	return true;
 }
 
-bool BasicProcessWin::wait()
+_AbstractBasicProcess::ExecResult BasicProcessWin::wait()
 {
 	close_input();
 
-	bool started = IS_VALID_HANDLE(m->pi().hProcess);
-	if (started) {
+	m->d.result.started = IS_VALID_HANDLE(m->pi().hProcess);
+	if (m->d.result.started) {
 		WaitForSingleObject(m->pi().hProcess, INFINITE);
 		DWORD ec = static_cast<DWORD>(-1);
 		if (GetExitCodeProcess(m->pi().hProcess, &ec)) {
-			m->d.exit_code = ec;
+			m->d.result.exit_code = ec;
 		}
 	}
 	m->d.pi = {};
@@ -364,8 +380,13 @@ bool BasicProcessWin::wait()
 	if (IS_VALID_HANDLE(m->d.hOutputRead)) {
 		m->d.hOutputRead.close();
 	}
+
+	m->output_bytes = std::move(m->d.output_vector);
+
+	auto ret = std::move(m->d.result);
 	m->d = {};
-	return started;
+	ret.exit_code = m->d.exit_code;
+	return ret;
 }
 
 bool BasicProcessWin::wait_for_output(const std::string &text)
@@ -373,10 +394,12 @@ bool BasicProcessWin::wait_for_output(const std::string &text)
 	// プロンプトが複数回のReadFileに分割されても、連結済みoutput_から検索できる。
 	// ワーカーが先に終了した場合はoutput_closed_で待機を解除する。
 	std::unique_lock<std::mutex> lock(m->output_mutex);
+	std::string s;
 	m->output_changed.wait(lock, [&]{
-		return m->d.output.find(text) != std::string::npos || m->d.output_closed;
+		s = std::string(m->d.output_vector.begin(), m->d.output_vector.end());
+		return s.find(text) != std::string::npos || m->d.output_closed;
 	});
-	return m->d.output.find(text) != std::string::npos;
+	return s.find(text) != std::string::npos;
 }
 
 void BasicProcessWin::close_input()
@@ -386,28 +409,42 @@ void BasicProcessWin::close_input()
 	}
 }
 
-bool BasicProcessWin::write_input(const char *ptr, size_t n)
+int BasicProcessWin::write_input(const char *ptr, int n)
 {
 	if (IS_VALID_HANDLE(m->d.hInputWrite)) {
 		if (write_all(m->d.hInputWrite, ptr, n)) {
-			return true;
+			return n;
 		}
+		return 0;
 	}
-	return false;
+	return -1;
 }
 
-bool BasicProcessWin::isRunning() const
+int BasicProcessWin::read_output(char *ptr, int n)
+{
+	std::lock_guard<std::mutex> lock(m->output_mutex);
+	if (!m->d.output_queue.empty()) {
+		int count = std::min(n, (int)m->d.output_queue.size());
+		for (int i = 0; i < count; i++) {
+			ptr[i] = m->d.output_queue.front();
+			m->d.output_queue.pop_front();
+		}
+		return static_cast<int>(count);
+	}
+	return 0;
+}
+
+bool BasicProcessWin::is_running() const
 {
 	return IS_VALID_HANDLE(m->pi().hProcess) || IS_VALID_HANDLE(m->pi().hThread);
 }
 
-std::string BasicProcessWin::stdout_bytes() const
+std::vector<char> const &BasicProcessWin::stdout_bytes() const
 {
-	std::lock_guard<std::mutex> lock(m->output_mutex);
-	return m->d.output;
+	return m->output_bytes;
 }
 
-int BasicProcessWin::getExitCode() const
+int BasicProcessWin::get_exit_code() const
 {
 	return static_cast<int>(m->d.exit_code);
 }
@@ -415,6 +452,7 @@ int BasicProcessWin::getExitCode() const
 // BasicProcessWinConPTY
 
 struct BasicProcessWinConPTY::Private {
+	BasicProcessWinConPTY::Options options;
 	struct D {
 		BOOL running = FALSE;
 		AutoProcessInformation pi;
@@ -423,19 +461,22 @@ struct BasicProcessWinConPTY::Private {
 		AutoHandle hPipeInWrite;
 		AutoHandle hPipeOutRead;
 		AutoHandle hPipeOutWrite;
-		BasicProcessWinConPTY::ExecResult result;
-		std::string output;
+		_AbstractBasicProcess::ExecResult result;
+		std::deque<char> output_queue;
+		std::vector<char> output_vector;
 		bool output_closed = false;
 	} d;
 	mutable std::mutex output_mutex;
+	std::vector<char> output_bytes;
 	std::atomic<bool> stop_input{false};
 	std::thread input_writer;
 	std::thread output_reader;
 };
 
-BasicProcessWinConPTY::BasicProcessWinConPTY()
+BasicProcessWinConPTY::BasicProcessWinConPTY(Options const &options)
 	: m(new Private)
 {
+	m->options = options;
 }
 
 BasicProcessWinConPTY::~BasicProcessWinConPTY()
@@ -551,11 +592,23 @@ bool BasicProcessWinConPTY::exec(const std::string &cmd)
 		char buf[256];
 		DWORD n;
 		while (ReadFile(m->d.hPipeOutRead, buf, sizeof(buf), &n, nullptr) && n > 0) {
-			std::string text = vt_stripper.append({buf, n});
+			std::string_view view(buf, n);
+			std::string text;
+			if (m->options.vt_stripped) {
+				text = vt_stripper.append(view);
+				view = std::string_view(text.data(), text.size());
+			}
 			if (!text.empty()) {
-				WriteFile(hStdOutput, text.data(), static_cast<DWORD>(text.size()), &n, nullptr);
+				if (m->options.output_stdout) {
+					WriteFile(hStdOutput, view.data(), static_cast<DWORD>(view.size()), &n, nullptr);
+				}
 				std::lock_guard<std::mutex> lock(m->output_mutex);
-				m->d.output.append(text);
+				if (m->options.output_vector) {
+					m->d.output_vector.insert(m->d.output_vector.end(), view.begin(), view.end());
+				}
+				if (m->options.output_queue) {
+					m->d.output_queue.insert(m->d.output_queue.end(), view.begin(), view.end());
+				}
 			}
 		}
 		{
@@ -595,6 +648,8 @@ BasicProcessWinConPTY::ExecResult BasicProcessWinConPTY::wait()
 		m->d.hPipeOutRead.close();
 	}
 
+	m->output_bytes = std::move(m->d.output_vector);
+
 	auto ret = std::move(m->d.result);
 	m->d = {};
 	return ret;
@@ -607,28 +662,41 @@ void BasicProcessWinConPTY::close_input()
 	}
 }
 
-bool BasicProcessWinConPTY::write_input(const char *ptr, size_t n)
+int BasicProcessWinConPTY::write_input(const char *ptr, int n)
 {
 	if (m->d.hPipeInWrite != nullptr) {
 		if (write_all(m->d.hPipeInWrite, ptr, static_cast<DWORD>(n))) {
-			return true;
+			return n;
 		}
+		return 0;
 	}
-	return false;
+	return -1;
 }
 
-bool BasicProcessWinConPTY::isRunning() const
+int BasicProcessWinConPTY::read_output(char *ptr, int len)
+{
+	std::lock_guard<std::mutex> lock(m->output_mutex);
+	if (m->d.output_queue.empty()) return 0;
+
+	int n = std::min(len, static_cast<int>(m->d.output_queue.size()));
+	for (int i = 0; i < n; ++i) {
+		ptr[i] = m->d.output_queue.front();
+		m->d.output_queue.pop_front();
+	}
+	return n;
+}
+
+bool BasicProcessWinConPTY::is_running() const
 {
 	return IS_VALID_HANDLE(m->d.pi->hProcess) || IS_VALID_HANDLE(m->d.pi->hThread);
 }
 
-std::string BasicProcessWinConPTY::stdout_bytes() const
+std::vector<char> const &BasicProcessWinConPTY::stdout_bytes() const
 {
-	std::lock_guard<std::mutex> lock(m->output_mutex);
-	return m->d.output;
+	return m->output_bytes;
 }
 
-int BasicProcessWinConPTY::getExitCode() const
+int BasicProcessWinConPTY::get_exit_code() const
 {
 	return static_cast<int>(m->d.result.exit_code);
 }
@@ -638,227 +706,5 @@ bool BasicProcessWinConPTY::is_conpty_available()
 	HMODULE hKernel32 = GetModuleHandleW(L"kernel32.dll");
 	if (!hKernel32) return false;
 	return GetProcAddress(hKernel32, "CreatePseudoConsole") != nullptr;
-}
-
-// ProcessWinPty
-
-struct ProcessWinPty::Private {
-	std::thread thread;
-	int input_fd = -1;
-	HANDLE hConout = INVALID_HANDLE_VALUE;
-	HANDLE hInput = INVALID_HANDLE_VALUE;
-	int exit_code = 128;
-};
-
-ProcessWinPty::ProcessWinPty()
-	: m(new Private)
-{
-
-}
-
-ProcessWinPty::~ProcessWinPty()
-{
-	wait();
-	delete m;
-}
-
-std::string ProcessWinPty::exec_winpty(const std::string &cmd, const std::string &env, bool use_input)
-{
-	std::string ret;
-	winpty_error_ptr_t err = nullptr;
-
-	winpty_config_t *cfg = winpty_config_new(WINPTY_FLAG_PLAIN_OUTPUT, &err);
-	if (!cfg) {
-		winpty_error_free(err);
-		return ret;
-	}
-
-	winpty_t *wp = winpty_open(cfg, &err);
-	winpty_config_free(cfg);
-	if (!wp) {
-		winpty_error_free(err);
-		return ret;
-	}
-
-	std::wstring wcmd = misc::convert_str_to_wstr(cmd);
-
-	std::wstring program = misc::convert_str_to_wstr(misc::getProgram(cmd));
-	wchar_t const *program_p = nullptr;
-	if (1) {
-		// コマンドから実行ファイル名を抜き取る。実際に実行されるプログラムのパス。
-		if (!program.empty()) {
-			program_p = program.c_str();
-		}
-	} else {
-		// nop:
-		// program_p が nullptr 空の時、PATHが通っているコマンドなら実行できる。
-	}
-
-	std::wstring wenv = misc::convert_str_to_wstr(env);
-	std::vector<wchar_t> envbuf;
-	if (!env.empty()) {
-		envbuf.resize(wenv.size() + 1);
-		memcpy(envbuf.data(), env.c_str(), sizeof(wchar_t) * env.size());
-	}
-
-	winpty_spawn_config_t *scfg = winpty_spawn_config_new(WINPTY_SPAWN_FLAG_AUTO_SHUTDOWN,
-														  program_p,
-														  wcmd.data(),
-														  nullptr,
-														  envbuf.empty() ? nullptr : envbuf.data(),
-														  &err);
-	if (!scfg) {
-		winpty_error_free(err);
-		winpty_free(wp);
-		return ret;
-	}
-
-	m->hConout = CreateFileW(
-				winpty_conout_name(wp),
-				GENERIC_READ, 0, nullptr,
-				OPEN_EXISTING, 0, nullptr
-				);
-
-	if (use_input) {
-		m->hInput = CreateFileW(
-					winpty_conin_name(wp),
-					GENERIC_WRITE, 0, nullptr,
-					OPEN_EXISTING, 0, nullptr
-					);
-	}
-
-	HANDLE hProcess = nullptr;
-	DWORD createError = 0;
-	BOOL ok = winpty_spawn(wp, scfg, &hProcess, nullptr, &createError, &err);
-	winpty_spawn_config_free(scfg);
-	if (!ok) {
-		winpty_error_free(err);
-		winpty_free(wp);
-		return ret;
-	}
-
-	if (m->hConout != INVALID_HANDLE_VALUE) {
-		char buf[256];
-		DWORD n;
-		while (ReadFile(m->hConout, buf, sizeof(buf), &n, nullptr) && n > 0) {
-			std::lock_guard<std::mutex> lock(mutex_);
-			writeOutput(buf, n);
-		}
-		CloseHandle(m->hConout);
-	}
-
-	WaitForSingleObject(hProcess, INFINITE);
-	CloseHandle(hProcess);
-	winpty_free(wp);
-
-	if (!ret.empty() && ret.back() == '\n') ret.pop_back();
-	if (!ret.empty() && ret.back() == '\r') ret.pop_back();
-
-	return ret;
-}
-
-bool ProcessWinPty::isRunning() const
-{
-	return m->thread.joinable();
-}
-
-void ProcessWinPty::writeInput(const char *ptr, int len)
-{
-	if (m->hInput != INVALID_HANDLE_VALUE) {
-		char const *begin = ptr;
-		char const *end = begin + len;
-		char const *left = begin;
-		char const *right = begin;
-		while (1) {
-			int c = -1;
-			if (right < end) {
-				c = *right & 0xff;
-			}
-			if (c == '\r' || c == '\n' || c < 0) {
-				if (left < right) {
-					DWORD written;
-					WriteFile(m->hInput, left, right - left, &written, nullptr);
-				}
-				if (c < 0) break;
-				right++;
-				if (c == '\r') {
-					if (*right == '\n') {
-						right++;
-					}
-					c = '\r';
-				} else if (c == '\n') {
-					c = '\r';
-				} else {
-					c = -1;
-				}
-				if (c >= 0) {
-					DWORD written;
-					WriteFile(m->hInput, &c, 1, &written, nullptr);
-				}
-				left = right;
-			} else {
-				right++;
-			}
-		}
-	}
-}
-
-void ProcessWinPty::start(const std::string &cmd, const std::string &env, bool use_input)
-{
-	m->thread = std::thread([&](std::string const &cmd, std::string const &env, bool use_input){
-			exec_winpty(cmd, env, use_input);
-			}, cmd, env, use_input);
-}
-
-bool ProcessWinPty::wait(unsigned long time)
-{
-	close_input();
-	if (m->thread.joinable()) {
-		m->thread.join();
-		stdout_bytes_ = output_vector_;
-		stderr_bytes_ = stderr_bytes_;
-		return true;
-	}
-	return false;
-}
-
-void ProcessWinPty::stop()
-{
-	if (m->hConout != INVALID_HANDLE_VALUE) {
-		CloseHandle(m->hConout);
-		m->hConout = INVALID_HANDLE_VALUE;
-	}
-	wait();
-}
-
-int ProcessWinPty::getExitCode() const
-{
-	return m->exit_code;
-}
-
-void ProcessWinPty::readResult(std::vector<char> *out)
-{
-	*out = output_vector_;
-	output_vector_.clear();
-}
-
-void ProcessWinPty::close_input()
-{
-	if (m->hInput != INVALID_HANDLE_VALUE) {
-		CloseHandle(m->hInput);
-		m->hInput = INVALID_HANDLE_VALUE;
-	}
-}
-
-int ProcessWinPty::readOutput(char *ptr, int len)
-{
-	std::lock_guard<std::mutex> lock(mutex_);
-	int n = output_queue_.size();
-	if (n > len) n = len;
-	for (int i = 0; i < n; i++) {
-		ptr[i] = output_queue_.front();
-		output_queue_.pop_front();
-	}
-	return n;
 }
 
