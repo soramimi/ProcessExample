@@ -11,6 +11,7 @@ private:
 	Private *m;
 	mutable std::vector<char> stdout_bytes_;
 	mutable std::vector<char> stderr_bytes_;
+	int exit_code_ = -1;
 	static void parseArgs(std::string const &cmd, std::vector<std::string> *out);
 public:
 	

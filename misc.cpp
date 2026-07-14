@@ -34,11 +34,17 @@ std::string misc::convert_wstr_to_str(const std::wstring &wstr)
 
 std::u16string misc::convert_str_to_wstr(const std::string_view &str)
 {
+	// POSIX側では現状呼び出し元が存在しない（Windows専用コードのみが利用）。
+	// 中身が空のまま抜けると戻り値が未初期化になり未定義動作になるため、
+	// 未実装であることを明示しつつ安全な空文字列を返す。
+	(void)str;
+	return {};
 }
 
 std::string misc::convert_wstr_to_str(const std::u16string &wstr)
 {
-	
+	(void)wstr;
+	return {};
 }
 
 #endif

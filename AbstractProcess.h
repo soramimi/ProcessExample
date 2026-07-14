@@ -3,6 +3,8 @@
 
 // #include <QObject>
 // #include <QVariant>
+#include <string>
+#include <vector>
 #include <deque>
 #include <functional>
 #include <mutex>

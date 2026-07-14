@@ -6,6 +6,9 @@
 #ifdef _WIN32
 #include <io.h>
 #else
+#include <atomic>
+#include <csignal>
+#include <cstdio>
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/ioctl.h>
@@ -14,6 +17,12 @@
 #include <sys/wait.h>
 #include <termios.h>
 #include <thread>
+
+namespace {
+// 子プロセスが標準入力を閉じた（あるいは既に終了した）後にwrite()すると、
+// デフォルトのSIGPIPEでアプリ全体が終了してしまうため、プロセス起動前に一度だけ無効化する。
+bool const ignore_sigpipe_ = [](){ std::signal(SIGPIPE, SIG_IGN); return true; }();
+}
 #endif
 
 
@@ -111,67 +120,73 @@ protected:
 		int stdin_pipe[3] = { -1, -1, -1 };
 		int stdout_pipe[3] = { -1, -1, -1 };
 		int stderr_pipe[3] = { -1, -1, -1 };
-		
-		try {
-			int fd_out_write;
-			int fd_err_write;
-			int pid;
-			
-			if (pipe(stdin_pipe) < 0) {
-				throw std::string("failed: pipe");
-			}
-			
-			if (pipe(stdout_pipe) < 0) {
-				throw std::string("failed: pipe");
-			}
-			
-			if (pipe(stderr_pipe) < 0) {
-				throw std::string("failed: pipe");
-			}
+		char const *error_message;
+		int fd_out_write;
+		int fd_err_write;
+		int pid;
 
-			pid = fork();
-			if (pid < 0) {
-				throw std::string("failed: fork");
-			}
-			
-			if (pid == 0) { // child
-				setenv("LANG", "C", 1);
-				close(stdin_pipe[W]);
-				close(stdout_pipe[R]);
-				close(stderr_pipe[R]);
-				dup2(stdin_pipe[R], R);
-				dup2(stdout_pipe[W], W);
-				dup2(stderr_pipe[W], E);
+		if (pipe(stdin_pipe) < 0) {
+			error_message = "failed: pipe";
+			goto fail;
+		}
+
+		if (pipe(stdout_pipe) < 0) {
+			error_message = "failed: pipe";
+			goto fail;
+		}
+
+		if (pipe(stderr_pipe) < 0) {
+			error_message = "failed: pipe";
+			goto fail;
+		}
+
+		pid = fork();
+		if (pid < 0) {
+			error_message = "failed: fork";
+			goto fail;
+		}
+
+		if (pid == 0) { // child
+			setenv("LANG", "C", 1);
+			close(stdin_pipe[W]);
+			close(stdout_pipe[R]);
+			close(stderr_pipe[R]);
+			dup2(stdin_pipe[R], R);
+			dup2(stdout_pipe[W], W);
+			dup2(stderr_pipe[W], E);
+			close(stdin_pipe[R]);
+			close(stdout_pipe[W]);
+			close(stderr_pipe[E]);
+			if (execvp(args[0], &args[0]) < 0) {
 				close(stdin_pipe[R]);
 				close(stdout_pipe[W]);
 				close(stderr_pipe[E]);
-				if (execvp(args[0], &args[0]) < 0) {
-					close(stdin_pipe[R]);
-					close(stdout_pipe[W]);
-					close(stderr_pipe[E]);
-					fprintf(stderr, "failed: exec\n");
-					exit(1);
-				}
+				fprintf(stderr, "failed: exec\n");
+				// forkした子プロセス側なので、exit()（atexitハンドラやCライブラリの
+				// バッファを親と共有した状態でフラッシュしてしまう）ではなく_exit()を使う。
+				_exit(127);
 			}
-			
-			close(stdin_pipe[R]);
-			close(stdout_pipe[W]);
-			close(stderr_pipe[W]);
-			fd_in_read = stdin_pipe[W];
-			fd_out_write = stdout_pipe[R];
-			fd_err_write = stderr_pipe[R];
-			
-			//
-			
-			if (!use_input) {
-				closeInput();
-			}
-			
+		}
+
+		close(stdin_pipe[R]);
+		close(stdout_pipe[W]);
+		close(stderr_pipe[W]);
+		fd_in_read = stdin_pipe[W];
+		fd_out_write = stdout_pipe[R];
+		fd_err_write = stderr_pipe[R];
+
+		//
+
+		if (!use_input) {
+			closeInput();
+		}
+
+		{
 			OutputReaderThread t1(fd_out_write, mutex, &outq);
 			OutputReaderThread t2(fd_err_write, mutex, &errq);
 			t1.start();
 			t2.start();
-			
+
 			while (1) {
 				std::this_thread::sleep_for(std::chrono::milliseconds(1));
 				int status = 0;
@@ -199,7 +214,13 @@ protected:
 							inq.erase(inq.begin(), inq.begin() + l);
 							if (fd_in_read != -1) {
 								int r = write(fd_in_read, tmp, l);
-								(void)r;
+								if (r < 0) {
+									// 子プロセスが標準入力を閉じている（またはすでに終了した）。
+									// これ以上書き込めないので入力側を閉じて諦める。
+									closeInput();
+									inq.clear();
+									break;
+								}
 							}
 							n -= l;
 						}
@@ -211,20 +232,25 @@ protected:
 
 			t1.wait();
 			t2.wait();
-			
-			close(fd_out_write);
-			close(fd_err_write);
-			
-		} catch (std::string const &e) {
-			close(stdin_pipe[R]);
-			close(stdin_pipe[W]);
-			close(stdout_pipe[R]);
-			close(stdout_pipe[W]);
-			close(stderr_pipe[R]);
-			close(stderr_pipe[W]);
-			fprintf(stderr, "%s\n", e.c_str());
-			exit(1);
 		}
+
+		close(fd_out_write);
+		close(fd_err_write);
+		return;
+
+	fail:
+		// ここに到達するのはpipe()/fork()がこのプロセス（親側）で失敗した場合のみ。
+		// fdを使い果たした等の一時的な資源不足でホストアプリ全体を巻き込んで
+		// 終了させるべきではないので、exit()は呼ばずに失敗として呼び出し元へ返す。
+		if (stdin_pipe[R] >= 0) close(stdin_pipe[R]);
+		if (stdin_pipe[W] >= 0) close(stdin_pipe[W]);
+		if (stdout_pipe[R] >= 0) close(stdout_pipe[R]);
+		if (stdout_pipe[W] >= 0) close(stdout_pipe[W]);
+		if (stderr_pipe[R] >= 0) close(stderr_pipe[R]);
+		if (stderr_pipe[W] >= 0) close(stderr_pipe[W]);
+		fd_in_read = -1;
+		exit_code = -1;
+		fprintf(stderr, "%s\n", error_message);
 	}
 public:
 	UnixProcessThread() = default;
@@ -341,9 +367,9 @@ int PosixProcess::wait()
 	stderr_bytes_.clear();
 	if (!m->th.outq.empty()) stdout_bytes_.insert(stdout_bytes_.end(), m->th.outq.begin(), m->th.outq.end());
 	if (!m->th.errq.empty()) stderr_bytes_.insert(stderr_bytes_.end(), m->th.errq.begin(), m->th.errq.end());
-	int exit_code = m->th.exit_code;
+	exit_code_ = m->th.exit_code;
 	m->th.reset();
-	return exit_code;
+	return exit_code_;
 }
 
 void PosixProcess::write_input(char const *ptr, int len)
@@ -397,7 +423,9 @@ bool PosixProcess::is_running() const
 
 int PosixProcess::get_exit_code() const
 {
-	return m->th.exit_code;
+	// wait()完了後はUnixProcessThread側がreset()で終了コードを失うため、
+	// wait()がキャッシュした値を返す。
+	return exit_code_;
 }
 
 //
@@ -534,10 +562,28 @@ void PosixPtyProcess::run()
 	ioctl(STDIN_FILENO, TIOCGWINSZ, (char *)&orig_winsize);
 	
 	m->pty_master = posix_openpt(O_RDWR);
-	grantpt(m->pty_master);
-	unlockpt(m->pty_master);
-	
+	if (m->pty_master < 0 || grantpt(m->pty_master) < 0 || unlockpt(m->pty_master) < 0) {
+		// PTYを確保できない場合はforkせずに失敗として終了する。
+		// ここでforkに進むと、壊れたfdを子プロセスに渡してしまい原因不明な不具合になる。
+		fprintf(stderr, "failed: posix_openpt/grantpt/unlockpt\n");
+		if (m->pty_master >= 0) {
+			close(m->pty_master);
+			m->pty_master = -1;
+		}
+		m->exit_code = -1;
+		notify_completed();
+		return;
+	}
+
 	pid_t pid = fork();
+	if (pid < 0) {
+		fprintf(stderr, "failed: fork\n");
+		close(m->pty_master);
+		m->pty_master = -1;
+		m->exit_code = -1;
+		notify_completed();
+		return;
+	}
 	if (pid == 0) {
 		setsid();
 		setenv("LANG", "C", 1);
@@ -546,11 +592,15 @@ void PosixPtyProcess::run()
 			strcpy(env, m->env.c_str());
 			putenv(env);
 		}
-		
+
 		char *pts_name = ptsname(m->pty_master);
-		int pty_slave = open(pts_name, O_RDWR);
+		int pty_slave = pts_name ? open(pts_name, O_RDWR) : -1;
 		close(m->pty_master);
-		
+		if (pty_slave < 0) {
+			fprintf(stderr, "failed: open pty slave\n");
+			_exit(127);
+		}
+
 		struct termios tio;
 		memset(&tio, 0, sizeof(tio));
 		cfmakeraw(&tio);
@@ -575,7 +625,15 @@ void PosixPtyProcess::run()
 		make_argv(command, &argv);
 		argv.push_back(nullptr);
 		execvp(argv[0], &argv[0]);
-		
+
+		// execvp()は成功すれば戻らない。ここに来るのは失敗した場合のみ。
+		// 何もせず抜けると、フォークされたこの子プロセスがスレッド関数の
+		// 残りを実行し続け（このプロセスにとっては唯一のスレッドなので）
+		// 最終的に終了コード0で静かに終了してしまい、呼び出し元からは
+		// コマンドが成功したように見えてしまう。
+		fprintf(stderr, "failed: exec\n");
+		_exit(127);
+
 	} else {
 		
 		bool ok = false;
