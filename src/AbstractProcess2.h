@@ -1,14 +1,19 @@
-#ifndef ABSTRACTPROCESS_H
-#define ABSTRACTPROCESS_H
+#ifndef ABSTRACTPROCESS2_H
+#define ABSTRACTPROCESS2_H
 
-// #include <QObject>
-// #include <QVariant>
 #include <string>
 #include <vector>
 #include <deque>
 #include <functional>
 #include <mutex>
 #include <condition_variable>
+#include "ProcessHelper.h"
+
+#ifdef APP_GUITAR
+#include <QObject>
+#include <QVariant>
+#endif
+
 
 class QString;
 
@@ -27,6 +32,7 @@ public:
 
 	virtual std::vector<char> const &stdout_bytes() const = 0;
 	virtual std::vector<char> const &stderr_bytes() const = 0;
+
 };
 
 
@@ -34,11 +40,12 @@ class AbstractPtyProcess {
 protected:
 	std::mutex mutex_;
 	std::condition_variable cond_;
-#ifdef QT_VERSION
-	QString change_dir_;
-	QVariant user_data_;
-	std::function<void (bool, const QVariant &)> completed_fn_;
-#endif
+
+	process::helper::dir_string_t change_dir_;
+
+	std::shared_ptr<void> user_data_;
+	std::function<void (bool, std::shared_ptr<void>)> completed_fn_;
+
 	std::deque<char> output_queue_; // for log
 	std::vector<char> output_vector_; // for result
 	std::vector<char> stdout_bytes_;
@@ -51,26 +58,26 @@ protected:
 public:
 	virtual ~AbstractPtyProcess() {}
 
-#ifdef QT_VERSION
-	void setChangeDir(QString const &dir);
-	// void setCompletedHandler(std::function<void (bool, const QVariant &)> fn, QVariant const &userdata)
-	// {
-	// 	completed_fn_ = fn;
-	// 	user_data_ = userdata;
-	// }
-#endif
+	void set_change_dir(process::helper::dir_string_t const &dir)
+	{
+		change_dir_ = dir;
+	}
+
+	void set_completion_callback(std::function<void (bool, std::shared_ptr<void>)> fn, std::shared_ptr<void> userdata)
+	{
+		completed_fn_ = fn;
+		user_data_ = userdata;
+	}
 
 	void notify_completed()
 	{
-#ifdef QT_VERSION
 		if (completed_fn_) {
 			completed_fn_(true, user_data_);
 		}
-#endif
 	}
 
-	std::string getMessage() const; // deprecated
-	void clearMessage();
+	std::string get_message() const; // deprecated
+	void clear_message();
 
 	std::vector<char> const &stdout_bytes() const
 	{
@@ -89,6 +96,7 @@ public:
 	virtual void write_input(char const *ptr, int len) = 0;
 	virtual int read_output(char *ptr, int len) = 0;
 	virtual void close_input() = 0;
+
 };
 
-#endif // ABSTRACTPROCESS_H
+#endif // ABSTRACTPROCESS2_H

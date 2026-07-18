@@ -6,6 +6,7 @@
 #include <string>
 #include <cctype>
 #include <cstring>
+#include <limits>
 
 class Base64 {
 private:
@@ -39,6 +40,7 @@ private:
 public:
 	static bool decode_checked(char const *src, size_t length, std::vector<char> *out)
 	{
+		if (!out) return false;
 		out->clear();
 		if (!src && length != 0) return false;
 
@@ -80,21 +82,25 @@ public:
 
 	static void encode(char const *src, size_t length, std::vector<char> *out)
 	{
-		size_t srcpos, dstlen, dstpos;
-
-		dstlen = (length + 2) / 3 * 4;
+		if (!out) return;
+		out->clear();
+		if (!src && length != 0) return;
+		if (length > std::numeric_limits<size_t>::max() / 4 * 3) return;
+		size_t srcpos = 0;
+		size_t dstlen = length / 3 * 4;
+		if (length % 3 != 0) dstlen += 4;
 		out->resize(dstlen);
 		if (dstlen == 0) {
 			return;
 		}
 		char *dst = &out->at(0);
-		dstpos = 0;
+		size_t dstpos = 0;
 		for (srcpos = 0; srcpos < length; srcpos += 3) {
-			int v = (unsigned char)src[srcpos] << 16;
+			int v = static_cast<unsigned char>(src[srcpos]) << 16;
 			if (srcpos + 1 < length) {
-				v |= (unsigned char)src[srcpos + 1] << 8;
+				v |= static_cast<unsigned char>(src[srcpos + 1]) << 8;
 				if (srcpos + 2 < length) {
-					v |= (unsigned char)src[srcpos + 2];
+					v |= static_cast<unsigned char>(src[srcpos + 2]);
 					dst[dstpos + 3] = enc(v);
 				} else {
 					dst[dstpos + 3] = PAD;

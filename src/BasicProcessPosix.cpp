@@ -1,4 +1,5 @@
 #include "BasicProcessPosix.h"
+#include "ProcessHelper.h"
 #include <cstring>
 #include <deque>
 #include <mutex>
@@ -19,11 +20,10 @@
 #include <termios.h>
 #include <thread>
 
-namespace {
-// 子プロセスが標準入力を閉じた（あるいは既に終了した）後にwrite()すると、
-// デフォルトのSIGPIPEでアプリ全体が終了してしまうため、プロセス起動前に一度だけ無効化する。
-bool const ignore_sigpipe_ = [](){ std::signal(SIGPIPE, SIG_IGN); return true; }();
-}
+#ifdef APP_GUITAR
+#include <QDir>
+#endif
+
 #endif
 
 
@@ -76,7 +76,7 @@ public:
 	}
 };
 
-class UnixProcessThread {
+class ProcessPosixThread {
 public:
 	std::thread thread;
 	std::mutex *mutex = nullptr;
@@ -89,6 +89,8 @@ public:
 	int fd_in_read = -1;
 	std::atomic<pid_t> pid{0};
 	int exit_code = -1;
+	int error_code = 0;
+	std::string error_message;
 	bool close_input_later = false;
 protected:
 public:
@@ -127,22 +129,26 @@ protected:
 		pid_t child_pid;
 
 		if (pipe(stdin_pipe) < 0) {
-			error_message = "failed: pipe";
+			error_code = errno;
+			error_message = "failed: pipe (stdin)";
 			goto fail;
 		}
 
 		if (pipe(stdout_pipe) < 0) {
-			error_message = "failed: pipe";
+			error_code = errno;
+			error_message = "failed: pipe (stdout)";
 			goto fail;
 		}
 
 		if (pipe(stderr_pipe) < 0) {
-			error_message = "failed: pipe";
+			error_code = errno;
+			error_message = "failed: pipe (stderr)";
 			goto fail;
 		}
 
 		child_pid = fork();
 		if (child_pid < 0) {
+			error_code = errno;
 			error_message = "failed: fork";
 			goto fail;
 		}
@@ -263,8 +269,8 @@ protected:
 		fprintf(stderr, "%s\n", error_message);
 	}
 public:
-	UnixProcessThread() = default;
-	~UnixProcessThread()
+	ProcessPosixThread() = default;
+	~ProcessPosixThread()
 	{
 		terminate();
 		stop();
@@ -308,22 +314,22 @@ public:
 	}
 };
 
-struct PosixProcess::Private {
+struct ProcessPosix::Private {
 	std::mutex mutex;
-	UnixProcessThread th;
+	ProcessPosixThread thread;
 };
 
-PosixProcess::PosixProcess()
+ProcessPosix::ProcessPosix()
 	: m(new Private)
 {
 }
 
-PosixProcess::~PosixProcess()
+ProcessPosix::~ProcessPosix()
 {
 	delete m;
 }
 
-void PosixProcess::parseArgs(std::string const &cmd, std::vector<std::string> *out)
+void ProcessPosix::parseArgs(std::string const &cmd, std::vector<std::string> *out)
 {
 	out->clear();
 	char const *begin = cmd.c_str();
@@ -363,89 +369,94 @@ void PosixProcess::parseArgs(std::string const &cmd, std::vector<std::string> *o
 	}
 }
 
-void PosixProcess::start(std::string const &command, bool use_input)
+void ProcessPosix::start(std::string const &command, bool use_input)
 {
 	if (is_running()) return;
 	exit_code_ = -1;
-	parseArgs(command, &m->th.argvec);
-	if (!m->th.argvec.empty()) {
-		for (std::string const &s : m->th.argvec) {
-			m->th.args.push_back(const_cast<char *>(s.c_str()));
-		}
-		m->th.args.push_back(nullptr);
-		
-		m->th.init(&m->mutex, use_input);
-		m->th.start();
+	error_code_ = 0;
+	error_message_.clear();
+	parseArgs(command, &m->thread.argvec);
+	if (m->thread.argvec.empty()) {
+		error_code_ = EINVAL;
+		error_message_ = "empty command or failed to parse arguments";
+		return;
 	}
+	for (std::string const &s : m->thread.argvec) {
+		m->thread.args.push_back(const_cast<char *>(s.c_str()));
+	}
+	m->thread.args.push_back(nullptr);
+	
+	m->thread.init(&m->mutex, use_input);
+	m->thread.start();
 }
 
-int PosixProcess::wait()
+int ProcessPosix::wait()
 {
-	m->th.wait();
+	m->thread.wait();
 	
 	stdout_bytes_.clear();
 	stderr_bytes_.clear();
-	if (!m->th.outq.empty()) stdout_bytes_.insert(stdout_bytes_.end(), m->th.outq.begin(), m->th.outq.end());
-	if (!m->th.errq.empty()) stderr_bytes_.insert(stderr_bytes_.end(), m->th.errq.begin(), m->th.errq.end());
-	exit_code_ = m->th.exit_code;
-	m->th.reset();
+	if (!m->thread.outq.empty()) stdout_bytes_.insert(stdout_bytes_.end(), m->thread.outq.begin(), m->thread.outq.end());
+	if (!m->thread.errq.empty()) stderr_bytes_.insert(stderr_bytes_.end(), m->thread.errq.begin(), m->thread.errq.end());
+	exit_code_ = m->thread.exit_code;
+	error_code_ = m->thread.error_code;
+	error_message_ = std::move(m->thread.error_message);
+	m->thread.reset();
 	return exit_code_;
 }
 
-void PosixProcess::write_input(char const *ptr, int len)
+int ProcessPosix::get_error_code() const
 {
-	m->th.writeInput(ptr, len);
+	return error_code_;
 }
 
-void PosixProcess::close_input(bool justnow)
+std::string const &ProcessPosix::get_error_message() const
+{
+	return error_message_;
+}
+
+void ProcessPosix::write_input(char const *ptr, int len)
+{
+	m->thread.writeInput(ptr, len);
+}
+
+void ProcessPosix::close_input(bool justnow)
 {
 	if (justnow) {
-		m->th.closeInput();
+		m->thread.closeInput();
 	} else {
-		m->th.close_input_later = true;
+		m->thread.close_input_later = true;
 	}
 }
 
-void PosixProcess::close_input()
+void ProcessPosix::close_input()
 {
 	close_input(true);
 }
 
-std::vector<char> const &PosixProcess::stdout_bytes() const
+std::vector<char> const &ProcessPosix::stdout_bytes() const
 {
 	return stdout_bytes_;
 }
 
-std::vector<char> const &PosixProcess::stderr_bytes() const
+std::vector<char> const &ProcessPosix::stderr_bytes() const
 {
 	return stderr_bytes_;
 }
 
-std::optional<std::string> PosixProcess::run_and_wait(const std::string &command)
+void ProcessPosix::stop()
 {
-	PosixProcess proc;
-	proc.start(command, false);
-	proc.wait();
-	std::vector<char> v = proc.stdout_bytes();
-	if (v.empty()) return std::nullopt;
-	return std::string(v.data(), v.size());
-}
-
-void PosixProcess::stop()
-{
-	m->th.terminate();
+	m->thread.terminate();
 	wait();
 }
 
-bool PosixProcess::is_running() const
+bool ProcessPosix::is_running() const
 {
-	return m->th.thread.joinable();
+	return m->thread.thread.joinable();
 }
 
-int PosixProcess::get_exit_code() const
+int ProcessPosix::get_exit_code() const
 {
-	// wait()完了後はUnixProcessThread側がreset()で終了コードを失うため、
-	// wait()がキャッシュした値を返す。
 	return exit_code_;
 }
 
@@ -490,9 +501,10 @@ void make_argv(char *command, std::vector<char *> *out)
 
 } // namespace
 
-// PosixPtyProcess
+// ProcessPosixPty
 
-struct PosixPtyProcess::Private {
+struct ProcessPosixPty::Private {
+	process::helper::PushDir pushd;
 	std::atomic<bool> interrupted{false};
 	std::mutex mutex;
 	std::thread thread;
@@ -500,26 +512,28 @@ struct PosixPtyProcess::Private {
 	std::string env;
 	int pty_master = -1;
 	int exit_code = -1;
+	int error_code = 0;
+	std::string error_message;
 };
 
-PosixPtyProcess::PosixPtyProcess()
+ProcessPosixPty::ProcessPosixPty()
 	: m(new Private)
 {
 }
 
-PosixPtyProcess::~PosixPtyProcess()
+ProcessPosixPty::~ProcessPosixPty()
 {
 	stop_();
 	delete m;
 }
 
-bool PosixPtyProcess::is_running() const
+bool ProcessPosixPty::is_running() const
 {
 	// return QThread::isRunning();
 	return m->thread.joinable();
 }
 
-void PosixPtyProcess::write_input(char const *ptr, int len)
+void ProcessPosixPty::write_input(char const *ptr, int len)
 {
 	if (!ptr || len <= 0) return;
 	std::lock_guard<std::mutex> lock(m->mutex);
@@ -533,7 +547,7 @@ void PosixPtyProcess::write_input(char const *ptr, int len)
 	}
 }
 
-int PosixPtyProcess::read_output(char *ptr, int len)
+int ProcessPosixPty::read_output(char *ptr, int len)
 {
 	// QMutexLocker lock(&m->mutex);
 	std::lock_guard<std::mutex> lock(m->mutex);
@@ -549,7 +563,7 @@ int PosixPtyProcess::read_output(char *ptr, int len)
 	return n;
 }
 
-void PosixPtyProcess::start(std::string const &cmd, std::string const &env, bool use_input)
+void ProcessPosixPty::start(std::string const &cmd, std::string const &env, bool use_input)
 {
 	(void)use_input;
 	if (is_running()) return;
@@ -557,15 +571,22 @@ void PosixPtyProcess::start(std::string const &cmd, std::string const &env, bool
 	m->env = env;
 	m->interrupted = false;
 	m->exit_code = -1;
-	if (cmd.empty()) return;
+	m->error_code = 0;
+	m->error_message.clear();
+	if (cmd.empty()) {
+		m->error_code = EINVAL;
+		m->error_message = "empty command";
+		return;
+	}
 	// QThread::start();
 	m->thread = std::thread([this](){
 		run();
 	});
 }
 
-bool PosixPtyProcess::wait_(unsigned long time)
+bool ProcessPosixPty::wait(unsigned long time)
 {
+	(void)time;
 	if (m->thread.joinable()) {
 		m->thread.join();
 		// QMutexLocker lock(&m->mutex);
@@ -577,12 +598,26 @@ bool PosixPtyProcess::wait_(unsigned long time)
 	return false;
 }
 
-int PosixPtyProcess::wait()
+int ProcessPosixPty::wait()
 {
-	return wait_(LONG_MAX);
+	bool ok = wait(LONG_MAX);
+	(void)ok;
+	error_code_ = m->error_code;
+	error_message_ = std::move(m->error_message);
+	return m->exit_code;
 }
 
-void PosixPtyProcess::run()
+int ProcessPosixPty::get_error_code() const
+{
+	return error_code_;
+}
+
+std::string const &ProcessPosixPty::get_error_message() const
+{
+	return error_message_;
+}
+
+void ProcessPosixPty::run()
 {
 	struct termios orig_termios = {};
 	struct winsize orig_winsize = {25, 80, 0, 0};
@@ -597,7 +632,9 @@ void PosixPtyProcess::run()
 	if (m->pty_master < 0 || grantpt(m->pty_master) < 0 || unlockpt(m->pty_master) < 0) {
 		// PTYを確保できない場合はforkせずに失敗として終了する。
 		// ここでforkに進むと、壊れたfdを子プロセスに渡してしまい原因不明な不具合になる。
-		fprintf(stderr, "failed: posix_openpt/grantpt/unlockpt\n");
+		m->error_code = errno;
+		m->error_message = "failed: posix_openpt/grantpt/unlockpt";
+		fprintf(stderr, "%s\n", m->error_message.c_str());
 		if (m->pty_master >= 0) {
 			close(m->pty_master);
 			m->pty_master = -1;
@@ -609,7 +646,9 @@ void PosixPtyProcess::run()
 
 	pid_t pid = fork();
 	if (pid < 0) {
-		fprintf(stderr, "failed: fork\n");
+		m->error_code = errno;
+		m->error_message = "failed: fork";
+		fprintf(stderr, "%s\n", m->error_message.c_str());
 		close(m->pty_master);
 		m->pty_master = -1;
 		m->exit_code = -1;
@@ -647,9 +686,7 @@ void PosixPtyProcess::run()
 		dup2(pty_slave, STDERR_FILENO);
 		close(pty_slave);
 		
-#ifdef QT_VERSION
-		QDir::setCurrent(change_dir_);
-#endif
+		chdir(change_dir_.c_str());
 		
 		char *command = (char *)alloca(m->command.size() + 1);
 		strcpy(command, m->command.c_str());
@@ -731,24 +768,24 @@ void PosixPtyProcess::run()
 	}
 }
 
-void PosixPtyProcess::stop_()
+void ProcessPosixPty::stop_()
 {
 	// requestInterruption();
 	m->interrupted = true;
-	wait_();
+	wait();
 }
 
-void PosixPtyProcess::stop()
+void ProcessPosixPty::stop()
 {
 	stop_();
 }
 
-int PosixPtyProcess::get_exit_code() const
+int ProcessPosixPty::get_exit_code() const
 {
 	return m->exit_code;
 }
 
-void PosixPtyProcess::close_input()
+void ProcessPosixPty::close_input()
 {
 	
 }
