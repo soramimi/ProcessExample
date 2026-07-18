@@ -12,6 +12,17 @@
 #include <BasicProcessPosix.h>
 #endif
 
+std::string trimmed(std::string str)
+{
+	str.erase(str.begin(), std::find_if(str.begin(), str.end(), [](unsigned char ch) {
+		return !std::isspace(ch);
+	}));
+	str.erase(std::find_if(str.rbegin(), str.rend(), [](unsigned char ch) {
+		return !std::isspace(ch);
+	}).base(), str.end());
+	return str;
+}
+
 #ifdef _WIN32
 int main_win_conpty_with_worker()
 {
@@ -32,7 +43,7 @@ int main_win_conpty_with_worker()
 	ProcessConPtyWithWorker proc;
 	proc.start(cmd, {}, true);
 
-#if 0
+#if 1
 	std::string prompt = "Are you sure you want to continue connecting";
 	if (proc.wait_for_output(prompt)) {
 		proc.write_input("no\n", 3);
@@ -41,6 +52,10 @@ int main_win_conpty_with_worker()
 
 	proc.close_input();
 	proc.wait();
+
+	std::vector<char> const &v = proc.stdout_bytes();
+	std::string str(v.data(), v.size());
+	printf("[%s]\n", trimmed(str).c_str());
 	return 0;
 }
 
@@ -52,14 +67,12 @@ int main_win(std::string const &cmd)
 	auto vec = proc.stdout_bytes();
 	std::string_view view(vec.data(), vec.size());
 	std::string str = std::string(view);
-	puts(str.c_str());
+	printf("[%s]\n", trimmed(str).c_str());
 	return 0;
 }
 
-int main_winpty(int /*argc*/, char ** /*argv*/)
+int main_winpty(std::string const &cmd)
 {
-	std::string cmd = R"("C:\Program Files\Git\cmd\git.exe")";
-	cmd += " --version";
 	ProcessWinPty proc;
 	proc.start(cmd, {}, false);
 	proc.wait();
@@ -67,7 +80,7 @@ int main_winpty(int /*argc*/, char ** /*argv*/)
 		char tmp[1024];
 		int len = proc.read_output(tmp, sizeof(tmp) - 1);
 		tmp[len] = 0;
-		puts(tmp);
+		printf("[%s]\n", trimmed(tmp).c_str());
 	}
 	return 0;
 }
@@ -82,20 +95,22 @@ int main_basic_win(std::string const &cmd)
 	auto vec = proc.stdout_bytes();
 	std::string_view view(vec.data(), vec.size());
 	std::string str = std::string(view);
-	puts(str.c_str());
+	printf("[%s]\n", trimmed(str).c_str());
 	return 0;
 }
 
 int main_basic_win_conpty(std::string const &cmd)
 {
-	BasicProcessWinConPTY proc;
+	BasicProcessWinConPTY::Options opts;
+	opts.output_vector = true;
+	BasicProcessWinConPTY proc(opts);
 	proc.set_no_window(false);
 	proc.start(cmd);
 	auto result = proc.wait();
 	auto vec = proc.stdout_bytes();
 	std::string_view view(vec.data(), vec.size());
 	std::string str = std::string(view);
-	puts(str.c_str());
+	printf("[%s]\n", trimmed(str).c_str());
 	return 0;
 }
 
@@ -108,7 +123,7 @@ int main_win_conpty(std::string const &cmd)
 	auto vec = proc.stdout_bytes();
 	std::string_view view(vec.data(), vec.size());
 	std::string str = std::string(view);
-	puts(str.c_str());
+	printf("[%s]\n", trimmed(str).c_str());
 	return 0;
 }
 #else
@@ -130,29 +145,13 @@ int main(int argc, char **argv)
 	std::string cmd = R"("C:\Program Files\Git\cmd\git.exe")";
 	cmd += " --version";
 
-	int select = 1;
-	switch (select) {
-	case 0:
-		main_basic_win(cmd);
-		break;
-	case 1:
-		main_basic_win_conpty(cmd);
-		break;
-	case 2:
-		main_win(cmd);
-		break;
-	case 3:
-		main_win_conpty(cmd);
-		break;
-	case 4:
-		main_win_conpty_with_worker(/*cmd*/);
-		break;
-	case 5:
-		main_winpty(argc, argv);
-		break;
-	default:
-		break;
-	}
+	main_basic_win(cmd);
+	main_basic_win_conpty(cmd);
+	main_win(cmd);
+	main_win_conpty(cmd);
+	main_win_conpty_with_worker(/*cmd*/);
+	main_winpty(cmd);
+
 	return 0;
 }
 #endif

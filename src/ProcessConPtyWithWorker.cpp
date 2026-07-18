@@ -4,17 +4,36 @@
 #include <misc.h>
 #include <algorithm>
 
+//
+
+#include <windows.h>
+#include "ProcessWinHelper.h"
+
+struct ProcessConPtyWithWorker::Private {
+	std::condition_variable cv;
+	BasicProcessWin proc;
+	bool started = false;
+	bool running = false;
+	int exit_code = -1;
+};
+
 ProcessConPtyWithWorker::ProcessConPtyWithWorker()
+	: m(new Private)
 {
 	BasicProcessWin::Options opts;
-	opts.output_stdout = true;
 	opts.output_vector = true; // output monitoring
-	proc_.set_options(opts);
+	set_options(opts);
 }
 
 ProcessConPtyWithWorker::~ProcessConPtyWithWorker()
 {
+	stop();
+	delete m;
+}
 
+void ProcessConPtyWithWorker::set_options(const BasicProcessWin::Options &options)
+{
+	m->proc.set_options(options);
 }
 
 int ProcessConPtyWithWorker::run_worker(int argc, char **argv)
@@ -63,9 +82,9 @@ void ProcessConPtyWithWorker::start(const std::string &command, const std::strin
 	(void)env;
 	stop();
 	std::lock_guard<std::mutex> lock(mutex_);
-	started_ = false;
-	running_ = false;
-	exit_code_ = -1;
+	m->started = false;
+	m->running = false;
+	m->exit_code = -1;
 	if (command.empty()) {
 		return;
 	}
@@ -103,68 +122,68 @@ void ProcessConPtyWithWorker::start(const std::string &command, const std::strin
 		base64_encode(command)
 	});
 
-	proc_.set_completion_callback([this](bool started, std::shared_ptr<void> user_data) {
+	m->proc.set_completion_callback([this](bool started, std::shared_ptr<void> user_data) {
 		(void)started;
 		(void)user_data;
-		running_ = false;
-		cv_.notify_all();
+		m->running = false;
+		m->cv.notify_all();
 		this->notify_completed();
 	}, this->user_data_);
 
-	proc_.set_change_dir(change_dir_);
-	started_ = proc_.start(cmd);
-	running_ = started_;
-	if (started_) {
+	m->proc.set_change_dir(change_dir_);
+	m->started = m->proc.start(cmd);
+	m->running = m->started;
+	if (m->started) {
 		stdout_bytes_.clear();
 		stderr_bytes_.clear();
 	}
-	exit_code_ = -1;
+	m->exit_code = -1;
 }
 
 bool ProcessConPtyWithWorker::wait(unsigned long time)
 {
 	std::unique_lock<std::mutex> lock(mutex_);
-	cv_.wait_for(lock, std::chrono::milliseconds(time), [this]() { return !running_; });
+	m->cv.wait_for(lock, std::chrono::milliseconds(time), [this]() { return !m->running; });
 	return true;
 }
 
 int ProcessConPtyWithWorker::wait()
 {
-	proc_.wait();
+	m->proc.wait();
 	
 	std::lock_guard<std::mutex> lock(mutex_);
-	std::vector<char> const &out = proc_.stdout_bytes();
-	stdout_bytes_.assign(out.begin(), out.end());
+	std::vector<char> const &out = m->proc.stdout_bytes();
+	stdout_bytes_ = out;
 	stderr_bytes_.clear();
-	exit_code_ = proc_.get_exit_code();
-	running_ = false;
-	return exit_code_;
+	m->exit_code = m->proc.get_exit_code();
+	m->running = false;
+	return m->exit_code;
 }
 
 void ProcessConPtyWithWorker::stop()
 {
 	std::lock_guard<std::mutex> lock(mutex_);
-	if (running_) {
-		proc_.close_input();
-		proc_.wait();
-		running_ = false;
-		std::vector<char> const &out = proc_.stdout_bytes();
+	if (m->running) {
+		m->proc.close_input();
+		m->proc.wait();
+		m->running = false;
+		std::vector<char> const &out = m->proc.stdout_bytes();
 		stdout_bytes_.assign(out.begin(), out.end());
 		stderr_bytes_.clear();
-		exit_code_ = proc_.get_exit_code();
+		m->exit_code = m->proc.get_exit_code();
 	}
 }
 
 bool ProcessConPtyWithWorker::is_running() const
 {
 	std::lock_guard<std::mutex> lock(mutex_);
-	return running_;
+	return m->running;
 }
 
 int ProcessConPtyWithWorker::get_exit_code() const
 {
 	std::lock_guard<std::mutex> lock(mutex_);
-	return exit_code_;
+	return m->exit_code;
 }
 
 void ProcessConPtyWithWorker::write_input(char const *ptr, int len)
@@ -173,8 +192,8 @@ void ProcessConPtyWithWorker::write_input(char const *ptr, int len)
 		return;
 	}
 	std::lock_guard<std::mutex> lock(mutex_);
-	if (running_) {
-		proc_.write_input(ptr, len);
+	if (m->running) {
+		m->proc.write_input(ptr, len);
 	}
 }
 
@@ -183,7 +202,7 @@ int ProcessConPtyWithWorker::read_output(char *ptr, int len)
 	if (!ptr || len <= 0) {
 		return 0;
 	}
-	int n = proc_.read_output(ptr, len);
+	int n = m->proc.read_output(ptr, len);
 	return n;
 	return 0;
 }
@@ -191,10 +210,10 @@ int ProcessConPtyWithWorker::read_output(char *ptr, int len)
 void ProcessConPtyWithWorker::close_input()
 {
 	std::lock_guard<std::mutex> lock(mutex_);
-	proc_.close_input();
+	m->proc.close_input();
 }
 
 bool ProcessConPtyWithWorker::wait_for_output(std::string const &text)
 {
-	return proc_.wait_for_output(text);
+	return m->proc.wait_for_output(text);
 }

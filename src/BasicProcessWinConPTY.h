@@ -8,7 +8,6 @@ class BasicProcessWinConPTY : public _AbstractBasicProcess {
 private:
 	struct Private;
 	Private *m;
-	process::helper::dir_string_t change_dir_;
 public:
 	struct Options {
 		bool no_window = false;
@@ -20,10 +19,7 @@ public:
 
 	BasicProcessWinConPTY(Options const &options = Options());
 	~BasicProcessWinConPTY();
-	void set_change_dir(process::helper::dir_string_t const &dir)
-	{
-		change_dir_ = dir;
-	}
+	void set_change_dir(process::helper::dir_string_t const &dir);
 	void set_options(Options const &options);
 
 	bool start(std::string const &cmd);

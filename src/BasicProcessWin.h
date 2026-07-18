@@ -48,9 +48,6 @@ class BasicProcessWin : public _AbstractBasicProcess {
 private:
 	struct Private;
 	Private *m;
-	process::helper::dir_string_t change_dir_;
-	std::shared_ptr<void> user_data_;
-	std::function<void (bool, std::shared_ptr<void>)> completed_fn_;
 public:
 	struct Options {
 		bool output_stdout = false;
@@ -59,34 +56,21 @@ public:
 	};
 	BasicProcessWin(Options const &options = Options());
 	~BasicProcessWin();
-	void set_change_dir(process::helper::dir_string_t const &dir)
-	{
-		change_dir_ = dir;
-	}
+	void set_change_dir(process::helper::dir_string_t const &dir);
 	void set_options(Options const &options);
+	bool is_running() const;
 	bool start(std::string const &cmd);
 	ExecResult wait();
 	void close_input();
 	int write_input(char const *ptr, int n);
 	int read_output(char *ptr, int n);
-	bool is_running() const;
-	std::vector<char> const &stdout_bytes() const;
 	int get_exit_code() const;
+	std::vector<char> const &stdout_bytes() const;
 
 	bool wait_for_output(std::string const &text);
 
-	void set_completion_callback(std::function<void (bool, std::shared_ptr<void>)> const &fn, std::shared_ptr<void> user_data)
-	{
-		completed_fn_ = fn;
-		user_data_ = user_data;
-	}
-
-	void notify_completed()
-	{
-		if (completed_fn_) {
-			completed_fn_(true, user_data_);
-		}
-	}
+	void set_completion_callback(std::function<void (bool, std::shared_ptr<void>)> const &fn, std::shared_ptr<void> user_data);
+	void notify_completed();
 };
 
 #endif // BASICPROCESSWIN_H

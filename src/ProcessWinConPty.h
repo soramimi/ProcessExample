@@ -7,18 +7,11 @@
 
 class ProcessWinConPty : public AbstractPtyProcess {
 private:
-	BasicProcessWinConPTY conpty_;
-	bool started_ = false;
-	bool running_ = false;
-	int exit_code_ = -1;
-	mutable std::mutex mutex_;
+	struct Private;
+	Private *m;
 public:
 	ProcessWinConPty();
-	~ProcessWinConPty() override = default;
-	void set_change_dir(process::helper::dir_string_t const &dir)
-	{
-		change_dir_ = dir;
-	}
+	~ProcessWinConPty() override;
 	void start(const std::string &command, const std::string &env, bool use_input) override;
 	int wait() override;
 	void stop() override;
@@ -27,10 +20,8 @@ public:
 	void close_input() override;
 	void write_input(char const *ptr, int len) override;
 	int read_output(char *ptr, int len);
-	void set_no_window(bool no_window)
-	{
-		conpty_.set_no_window(no_window);
-	}
+	void set_no_window(bool no_window);
+	void set_options(BasicProcessWinConPTY::Options const &options);
 };
 
 

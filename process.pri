@@ -10,7 +10,6 @@ win32 {
 		$$PROCESS_SRC/ProcessWin.cpp \
 		$$PROCESS_SRC/BasicProcessWinConPTY.cpp \
 		$$PROCESS_SRC/ProcessConPtyWithWorker.cpp \
-		$$PROCESS_SRC/ProcessHelper.cpp \
 		$$PROCESS_SRC/ProcessWinConPty.cpp \
 		$$PROCESS_SRC/ProcessWinPty.cpp
 }

@@ -8,31 +8,22 @@ class ProcessWin : public AbstractProcess {
 private:
 	struct Private;
 	Private *m;
+	void _close_input(bool justnow);
 public:
-
 	ProcessWin();
 	~ProcessWin();
-
-	void start(const std::string &command, bool use_input);
-	int wait();
 	bool is_running() const;
 	void write_input(char const *ptr, int len);
-	void _close_input(bool justnow);
-
+	void close_input();
+	void start(const std::string &command, bool use_input);
 	void stop();
+	int wait();
 	int get_exit_code() const;
 
 	const std::vector<char> &stdout_bytes() const;
 	const std::vector<char> &stderr_bytes() const;
 
-	// AbstractProcess interface
-public:
-	void close_input()
-	{
-		_close_input(true);
-	}
 };
-
 
 class ProcessWinPty : public AbstractPtyProcess {
 private:
@@ -52,11 +43,8 @@ public:
 	int wait();
 	int get_exit_code() const override;
 
-	// AbstractPtyProcess interface
-public:
-	bool wait(unsigned long time)
+	bool wait(unsigned long /*time*/)
 	{
-		(void)time;
 		return wait() == 0;
 	}
 };

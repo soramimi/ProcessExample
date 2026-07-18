@@ -3,7 +3,6 @@
 #include "ProcessWinHelper.h"
 
 struct BasicProcessWinConPTY::Private {
-	BasicProcessWinConPTY::Options options;
 	struct D {
 		BOOL running = FALSE;
 		AutoProcessInformation pi;
@@ -18,6 +17,8 @@ struct BasicProcessWinConPTY::Private {
 		bool output_closed = false;
 	} d;
 	mutable std::mutex output_mutex;
+	BasicProcessWinConPTY::Options options;
+	process::helper::dir_string_t change_dir;
 	std::vector<char> output_bytes;
 	std::atomic<bool> stop_input{false};
 	std::thread input_writer;
@@ -35,6 +36,11 @@ BasicProcessWinConPTY::~BasicProcessWinConPTY()
 {
 	wait();
 	delete m;
+}
+
+void BasicProcessWinConPTY::set_change_dir(const process::helper::dir_string_t &dir)
+{
+	m->change_dir = dir;
 }
 
 void BasicProcessWinConPTY::set_options(const Options &options)
@@ -113,7 +119,7 @@ bool BasicProcessWinConPTY::start(const std::string &cmd)
 							  FALSE,
 							  creation_flags,
 							  nullptr,
-							  change_dir_.empty() ? nullptr : change_dir_.c_str(),
+							  m->change_dir.empty() ? nullptr : m->change_dir.c_str(),
 							  &siEx.StartupInfo,
 							  &m->d.pi);
 	if (!m->d.running) {
@@ -185,6 +191,7 @@ bool BasicProcessWinConPTY::start(const std::string &cmd)
 			if (m->options.vt_stripped) {
 				text = vt_stripper.append(view);
 				view = std::string_view(text.data(), text.size());
+				// fprintf(stderr, "Stripped: %d %s\n", (int)text.size(), text.c_str());
 			}
 			if (!view.empty()) {
 				if (m->options.output_stdout) {

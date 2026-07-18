@@ -310,6 +310,11 @@ void ProcessWin::write_input(char const *ptr, int len)
 	m->th.writeInput(ptr, len);
 }
 
+void ProcessWin::close_input()
+{
+	_close_input(true);
+}
+
 void ProcessWin::_close_input(bool justnow)
 {
 	if (justnow) {

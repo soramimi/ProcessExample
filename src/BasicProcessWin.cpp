@@ -74,6 +74,10 @@ std::string misc::build_command_line(std::vector<std::string> const &args)
 
 struct BasicProcessWin::Private {
 	BasicProcessWin::Options options;
+	process::helper::dir_string_t change_dir;
+	std::shared_ptr<void> user_data;
+	std::function<void (bool, std::shared_ptr<void>)> completed_fn;
+
 	struct D {
 		AutoHandle hInputWrite;
 		AutoHandle hOutputRead;
@@ -109,9 +113,27 @@ BasicProcessWin::~BasicProcessWin()
 	delete m;
 }
 
+void BasicProcessWin::set_change_dir(const process::helper::dir_string_t &dir)
+{
+	m->change_dir = dir;
+}
+
 void BasicProcessWin::set_options(Options const &options)
 {
 	m->options = options;
+}
+
+void BasicProcessWin::set_completion_callback(const std::function<void (bool, std::shared_ptr<void>)> &fn, std::shared_ptr<void> user_data)
+{
+	m->completed_fn = fn;
+	m->user_data = user_data;
+}
+
+void BasicProcessWin::notify_completed()
+{
+	if (m->completed_fn) {
+		m->completed_fn(true, m->user_data);
+	}
 }
 
 bool BasicProcessWin::start(const std::string &cmd)
