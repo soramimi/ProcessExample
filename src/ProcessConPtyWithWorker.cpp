@@ -2,10 +2,7 @@
 #include "ProcessConPtyWithWorker.h"
 #include <base64.h>
 #include <misc.h>
-#include <windows.h>
 #include <algorithm>
-
-#include "ProcessWinHelper.h"
 
 ProcessConPtyWithWorker::ProcessConPtyWithWorker()
 {
@@ -133,16 +130,8 @@ bool ProcessConPtyWithWorker::wait(unsigned long time)
 
 int ProcessConPtyWithWorker::wait()
 {
-#if 1
 	proc_.wait();
-#else
-
-	std::lock_guard<std::mutex> lock(mutex_);
-	if (!running_) {
-		return exit_code_;
-	}
-	proc_.wait();
-#endif
+	
 	std::lock_guard<std::mutex> lock(mutex_);
 	std::vector<char> const &out = proc_.stdout_bytes();
 	stdout_bytes_.assign(out.begin(), out.end());
@@ -194,11 +183,8 @@ int ProcessConPtyWithWorker::read_output(char *ptr, int len)
 	if (!ptr || len <= 0) {
 		return 0;
 	}
-	// std::lock_guard<std::mutex> lock(mutex_);
-	// if (running_) {
-		int n = proc_.read_output(ptr, len);
-		return n;
-	// }
+	int n = proc_.read_output(ptr, len);
+	return n;
 	return 0;
 }
 
@@ -207,22 +193,6 @@ void ProcessConPtyWithWorker::close_input()
 	std::lock_guard<std::mutex> lock(mutex_);
 	proc_.close_input();
 }
-
-// std::vector<char> const &ProcessConPtyWithWorker::stdout_bytes() const
-// {
-// 	std::lock_guard<std::mutex> lock(mutex_);
-// 	if (running_) {
-// 		std::string out = proc_.stdout_bytes();
-// 		stdout_bytes_.assign(out.begin(), out.end());
-// 	}
-// 	return stdout_bytes_;
-// }
-
-// std::vector<char> const &ProcessConPtyWithWorker::stderr_bytes() const
-// {
-// 	std::lock_guard<std::mutex> lock(mutex_);
-// 	return stderr_bytes_;
-// }
 
 bool ProcessConPtyWithWorker::wait_for_output(std::string const &text)
 {

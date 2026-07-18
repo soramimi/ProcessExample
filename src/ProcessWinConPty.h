@@ -2,7 +2,7 @@
 #ifndef PROCESSWINCONPTY_H
 #define PROCESSWINCONPTY_H
 
-#include "AbstractProcess2.h"
+#include "AbstractProcess.h"
 #include "BasicProcessWinConPTY.h"
 
 class ProcessWinConPty : public AbstractPtyProcess {

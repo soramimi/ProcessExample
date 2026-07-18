@@ -317,6 +317,11 @@ public:
 struct ProcessPosix::Private {
 	std::mutex mutex;
 	ProcessPosixThread thread;
+	std::vector<char> stdout_bytes;
+	std::vector<char> stderr_bytes;
+	int exit_code = -1;
+	int error_code = 0;
+	std::string error_message;
 };
 
 ProcessPosix::ProcessPosix()
@@ -329,7 +334,7 @@ ProcessPosix::~ProcessPosix()
 	delete m;
 }
 
-void ProcessPosix::parseArgs(std::string const &cmd, std::vector<std::string> *out)
+void ProcessPosix::parse_args(std::string const &cmd, std::vector<std::string> *out)
 {
 	out->clear();
 	char const *begin = cmd.c_str();
@@ -372,13 +377,13 @@ void ProcessPosix::parseArgs(std::string const &cmd, std::vector<std::string> *o
 void ProcessPosix::start(std::string const &command, bool use_input)
 {
 	if (is_running()) return;
-	exit_code_ = -1;
-	error_code_ = 0;
-	error_message_.clear();
-	parseArgs(command, &m->thread.argvec);
+	m->exit_code = -1;
+	m->error_code = 0;
+	m->error_message.clear();
+	parse_args(command, &m->thread.argvec);
 	if (m->thread.argvec.empty()) {
-		error_code_ = EINVAL;
-		error_message_ = "empty command or failed to parse arguments";
+		m->error_code = EINVAL;
+		m->error_message = "empty command or failed to parse arguments";
 		return;
 	}
 	for (std::string const &s : m->thread.argvec) {
@@ -394,25 +399,25 @@ int ProcessPosix::wait()
 {
 	m->thread.wait();
 	
-	stdout_bytes_.clear();
-	stderr_bytes_.clear();
-	if (!m->thread.outq.empty()) stdout_bytes_.insert(stdout_bytes_.end(), m->thread.outq.begin(), m->thread.outq.end());
-	if (!m->thread.errq.empty()) stderr_bytes_.insert(stderr_bytes_.end(), m->thread.errq.begin(), m->thread.errq.end());
-	exit_code_ = m->thread.exit_code;
-	error_code_ = m->thread.error_code;
-	error_message_ = std::move(m->thread.error_message);
+	m->stdout_bytes.clear();
+	m->stderr_bytes.clear();
+	if (!m->thread.outq.empty()) m->stdout_bytes.insert(m->stdout_bytes.end(), m->thread.outq.begin(), m->thread.outq.end());
+	if (!m->thread.errq.empty()) m->stderr_bytes.insert(m->stderr_bytes.end(), m->thread.errq.begin(), m->thread.errq.end());
+	m->exit_code = m->thread.exit_code;
+	m->error_code = m->thread.error_code;
+	m->error_message = std::move(m->thread.error_message);
 	m->thread.reset();
-	return exit_code_;
+	return m->exit_code;
 }
 
 int ProcessPosix::get_error_code() const
 {
-	return error_code_;
+	return m->error_code;
 }
 
 std::string const &ProcessPosix::get_error_message() const
 {
-	return error_message_;
+	return m->error_message;
 }
 
 void ProcessPosix::write_input(char const *ptr, int len)
@@ -436,12 +441,12 @@ void ProcessPosix::close_input()
 
 std::vector<char> const &ProcessPosix::stdout_bytes() const
 {
-	return stdout_bytes_;
+	return m->stdout_bytes;
 }
 
 std::vector<char> const &ProcessPosix::stderr_bytes() const
 {
-	return stderr_bytes_;
+	return m->stderr_bytes;
 }
 
 void ProcessPosix::stop()
@@ -457,7 +462,7 @@ bool ProcessPosix::is_running() const
 
 int ProcessPosix::get_exit_code() const
 {
-	return exit_code_;
+	return m->exit_code;
 }
 
 //
@@ -523,7 +528,7 @@ ProcessPosixPty::ProcessPosixPty()
 
 ProcessPosixPty::~ProcessPosixPty()
 {
-	stop_();
+	stop();
 	delete m;
 }
 
@@ -602,19 +607,19 @@ int ProcessPosixPty::wait()
 {
 	bool ok = wait(LONG_MAX);
 	(void)ok;
-	error_code_ = m->error_code;
-	error_message_ = std::move(m->error_message);
+	m->error_code = m->error_code;
+	m->error_message = std::move(m->error_message);
 	return m->exit_code;
 }
 
 int ProcessPosixPty::get_error_code() const
 {
-	return error_code_;
+	return m->error_code;
 }
 
 std::string const &ProcessPosixPty::get_error_message() const
 {
-	return error_message_;
+	return m->error_message;
 }
 
 void ProcessPosixPty::run()
@@ -741,10 +746,6 @@ void ProcessPosixPty::run()
 					char buf[1024];
 					int len = read(m->pty_master, buf, sizeof(buf));
 					if (len > 0) {
-						// QMutexLocker lock(&m->mutex);
-						std::lock_guard<std::mutex> lock(m->mutex);
-						// output_queue_.insert(output_queue_.end(), buf, buf + len);
-						// output_vector_.insert(output_vector_.end(), buf, buf + len);
 						write_output(buf, len);
 					}
 				}
@@ -768,16 +769,12 @@ void ProcessPosixPty::run()
 	}
 }
 
-void ProcessPosixPty::stop_()
-{
-	// requestInterruption();
-	m->interrupted = true;
-	wait();
-}
+
 
 void ProcessPosixPty::stop()
 {
-	stop_();
+	m->interrupted = true;
+	wait();
 }
 
 int ProcessPosixPty::get_exit_code() const
@@ -787,7 +784,6 @@ int ProcessPosixPty::get_exit_code() const
 
 void ProcessPosixPty::close_input()
 {
-	
 }
 
 

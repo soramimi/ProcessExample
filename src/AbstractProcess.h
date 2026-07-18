@@ -1,5 +1,5 @@
-#ifndef ABSTRACTPROCESS2_H
-#define ABSTRACTPROCESS2_H
+#ifndef ABSTRACTPROCESS_H
+#define ABSTRACTPROCESS_H
 
 #include <string>
 #include <vector>
@@ -38,7 +38,7 @@ public:
 
 class AbstractPtyProcess {
 protected:
-	std::mutex mutex_;
+	mutable std::mutex mutex_;
 	std::condition_variable cond_;
 
 	process::helper::dir_string_t change_dir_;
@@ -50,11 +50,8 @@ protected:
 	std::vector<char> output_vector_; // for result
 	std::vector<char> stdout_bytes_;
 	std::vector<char> stderr_bytes_;
-	void write_output(char const *buf, size_t len)
-	{
-		output_queue_.insert(output_queue_.end(), buf, buf + len);
-		output_vector_.insert(output_vector_.end(), buf, buf + len);
-	}
+	
+	void write_output(char const *buf, size_t len);
 public:
 	virtual ~AbstractPtyProcess() {}
 
@@ -99,4 +96,4 @@ public:
 
 };
 
-#endif // ABSTRACTPROCESS2_H
+#endif // ABSTRACTPROCESS_H

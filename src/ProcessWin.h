@@ -1,7 +1,7 @@
 #ifndef PROCESSWIN_H
 #define PROCESSWIN_H
 
-#include "AbstractProcess2.h"
+#include "AbstractProcess.h"
 #include "BasicProcessWin.h"
 
 class ProcessWin : public AbstractProcess {

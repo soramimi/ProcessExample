@@ -1,7 +1,7 @@
 #ifndef PROCESSCONPTYWITHWORKER_H
 #define PROCESSCONPTYWITHWORKER_H
 
-#include "AbstractProcess2.h"
+#include "AbstractProcess.h"
 #include "BasicProcessWin.h"
 #include <condition_variable>
 #include <string>

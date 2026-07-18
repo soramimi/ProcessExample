@@ -1,7 +1,7 @@
 #ifndef BASICPROCESSWIN_H
 #define BASICPROCESSWIN_H
 
-#include "AbstractProcess2.h"
+#include "AbstractProcess.h"
 
 #include <thread>
 #include <mutex>

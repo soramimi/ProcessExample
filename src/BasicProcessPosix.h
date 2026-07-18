@@ -1,7 +1,7 @@
 #ifndef BASICPROCESSPOSIX_H
 #define BASICPROCESSPOSIX_H
 
-#include "AbstractProcess2.h"
+#include "AbstractProcess.h"
 #include <optional>
 #include <climits>
 
@@ -9,17 +9,10 @@ class ProcessPosix : public AbstractProcess {
 private:
 	struct Private;
 	Private *m;
-	mutable std::vector<char> stdout_bytes_;
-	mutable std::vector<char> stderr_bytes_;
-	int exit_code_ = -1;
-	int error_code_ = 0;
-	std::string error_message_;
-	static void parseArgs(std::string const &cmd, std::vector<std::string> *out);
+	static void parse_args(std::string const &cmd, std::vector<std::string> *out);
 public:
-	
 	ProcessPosix();
 	~ProcessPosix();
-	
 	void start(std::string const &command, bool use_input);
 	int wait();
 	void stop();
@@ -40,9 +33,6 @@ class ProcessPosixPty : public AbstractPtyProcess {
 private:
 	struct Private;
 	Private *m;
-	int error_code_ = 0;
-	std::string error_message_;
-	void stop_();
 protected:
 	void run();
 public:
