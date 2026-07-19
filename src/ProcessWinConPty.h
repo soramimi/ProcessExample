@@ -9,10 +9,11 @@ class ProcessWinConPty : public AbstractPtyProcess {
 private:
 	struct Private;
 	Private *m;
+
 public:
 	ProcessWinConPty();
 	~ProcessWinConPty() override;
-	void start(const std::string &command, const std::string &env, bool use_input) override;
+	void start(std::string const &command, std::string const &env, bool use_input) override;
 	int wait() override;
 	void stop() override;
 	bool is_running() const override;
@@ -23,6 +24,5 @@ public:
 	void set_no_window(bool no_window);
 	void set_options(BasicProcessWinConPTY::Options const &options);
 };
-
 
 #endif // PROCESSWINCONPTY_H

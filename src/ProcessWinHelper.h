@@ -100,9 +100,11 @@ inline std::string_view getProgram(std::string_view cmdline)
 
 template <typename HANDLE> class AbstractAutoHandle {
 private:
-	HANDLE h_ = {};
+	HANDLE h_ = { };
+
 protected:
 	virtual void close_handle(HANDLE &h) = 0;
+
 public:
 	AbstractAutoHandle() = default;
 	AbstractAutoHandle(HANDLE h)
@@ -110,12 +112,12 @@ public:
 	{
 	}
 	AbstractAutoHandle(AbstractAutoHandle const &) = delete;
-	AbstractAutoHandle &operator = (AbstractAutoHandle const &) = delete;
+	AbstractAutoHandle &operator=(AbstractAutoHandle const &) = delete;
 	AbstractAutoHandle(AbstractAutoHandle &&r) noexcept
 		: h_(r.detach())
 	{
 	}
-	AbstractAutoHandle &operator = (AbstractAutoHandle &&r) noexcept
+	AbstractAutoHandle &operator=(AbstractAutoHandle &&r) noexcept
 	{
 		if (this != std::addressof(r)) {
 			close();
@@ -130,7 +132,7 @@ public:
 	HANDLE detach()
 	{
 		HANDLE h = h_;
-		h_ = {};
+		h_ = { };
 		return h;
 	}
 	void close()
@@ -140,23 +142,23 @@ public:
 			close_handle(h);
 		}
 	}
-	HANDLE *operator -> ()
+	HANDLE *operator->()
 	{
 		return &h_;
 	}
-	HANDLE *operator & ()
+	HANDLE *operator&()
 	{
 		close();
 		return &h_;
 	}
-	HANDLE &operator = (HANDLE h)
+	HANDLE &operator=(HANDLE h)
 	{
 		if (h_ == h) return h_;
 		close();
 		h_ = h;
 		return h_;
 	}
-	operator HANDLE & ()
+	operator HANDLE &()
 	{
 		return h_;
 	}
@@ -169,6 +171,7 @@ protected:
 		CloseHandle(h);
 		h = nullptr;
 	}
+
 public:
 	using AbstractAutoHandle<HANDLE>::AbstractAutoHandle;
 	using AbstractAutoHandle<HANDLE>::operator=;
@@ -176,7 +179,8 @@ public:
 
 class AutoProcessInformation : public AbstractAutoHandle<PROCESS_INFORMATION> {
 private:
-	PROCESS_INFORMATION pi = {};
+	PROCESS_INFORMATION pi = { };
+
 protected:
 	void close_handle(PROCESS_INFORMATION &pi)
 	{
@@ -186,8 +190,9 @@ protected:
 		if (IS_VALID_HANDLE(pi.hThread)) {
 			CloseHandle(pi.hThread);
 		}
-		pi = {};
+		pi = { };
 	}
+
 public:
 	using AbstractAutoHandle<PROCESS_INFORMATION>::AbstractAutoHandle;
 	using AbstractAutoHandle<PROCESS_INFORMATION>::operator=;
@@ -196,16 +201,17 @@ public:
 class AutoPseudoConsole {
 private:
 	HPCON hPC = nullptr;
+
 public:
 	AutoPseudoConsole() = default;
 	AutoPseudoConsole(AutoPseudoConsole const &) = delete;
-	AutoPseudoConsole &operator = (AutoPseudoConsole const &) = delete;
+	AutoPseudoConsole &operator=(AutoPseudoConsole const &) = delete;
 	AutoPseudoConsole(AutoPseudoConsole &&r) noexcept
 		: hPC(r.hPC)
 	{
 		r.hPC = nullptr;
 	}
-	AutoPseudoConsole &operator = (AutoPseudoConsole &&r) noexcept
+	AutoPseudoConsole &operator=(AutoPseudoConsole &&r) noexcept
 	{
 		if (this != std::addressof(r)) {
 			close();
@@ -225,11 +231,11 @@ public:
 			hPC = nullptr;
 		}
 	}
-	operator HPCON & ()
+	operator HPCON &()
 	{
 		return hPC;
 	}
-	HPCON *operator & ()
+	HPCON *operator&()
 	{
 		return &hPC;
 	}

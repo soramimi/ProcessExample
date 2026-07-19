@@ -1,6 +1,6 @@
 #include "BasicProcessWinConPTY.h"
 #include <windows.h>
-#include "ProcessWinHelper.h"
+#include "ProcessWinHelper.h" // This file must be included after <windows.h>
 
 struct BasicProcessWinConPTY::Private {
 	struct D {
@@ -20,9 +20,12 @@ struct BasicProcessWinConPTY::Private {
 	BasicProcessWinConPTY::Options options;
 	process::helper::dir_string_t change_dir;
 	std::vector<char> output_bytes;
-	std::atomic<bool> stop_input{false};
+	std::atomic<bool> stop_input { false };
 	std::thread input_writer;
 	std::thread output_reader;
+	std::mutex input_mutex;
+	std::mutex snap_mutex;
+	HANDLE hProcess_snap = nullptr;
 	DWORD last_exit_code = static_cast<DWORD>(-1);
 };
 
@@ -34,25 +37,26 @@ BasicProcessWinConPTY::BasicProcessWinConPTY(Options const &options)
 
 BasicProcessWinConPTY::~BasicProcessWinConPTY()
 {
+	terminate();
 	wait();
 	delete m;
 }
 
-void BasicProcessWinConPTY::set_change_dir(const process::helper::dir_string_t &dir)
+void BasicProcessWinConPTY::set_change_dir(process::helper::dir_string_t const &dir)
 {
 	m->change_dir = dir;
 }
 
-void BasicProcessWinConPTY::set_options(const Options &options)
+void BasicProcessWinConPTY::set_options(Options const &options)
 {
 	m->options = options;
 }
 
-bool BasicProcessWinConPTY::start(const std::string &cmd)
+bool BasicProcessWinConPTY::start(std::string const &cmd)
 {
 	wait();
 	if (cmd.empty()) return false;
-	m->d = {};
+	m->d = { };
 
 	// ConPTYから見た入力用と出力用の2本の匿名パイプを用意する。
 	if (!CreatePipe(&m->d.hPipeInRead, &m->d.hPipeInWrite, nullptr, 0)) {
@@ -63,18 +67,18 @@ bool BasicProcessWinConPTY::start(const std::string &cmd)
 	}
 	if (!CreatePipe(&m->d.hPipeOutRead, &m->d.hPipeOutWrite, nullptr, 0)) {
 		DWORD error_code = GetLastError();
-		m->d = {};
+		m->d = { };
 		m->d.result.error_code = error_code;
 		m->d.result.error_message = misc::get_error_message(error_code);
 		return false;
 	}
 
-	COORD size = {80, 25};
+	COORD size = { 80, 25 };
 	HRESULT hr = CreatePseudoConsole(size, m->d.hPipeInRead, m->d.hPipeOutWrite, 0, &m->d.hPC);
 	// ConPTY に接続する子プロセスを作成するまで、パイプ端は保持する。
 	if (FAILED(hr)) {
 		DWORD error_code = static_cast<DWORD>(hr);
-		m->d = {};
+		m->d = { };
 		m->d.result.error_code = error_code;
 		m->d.result.error_message = misc::get_error_message(error_code);
 		return false;
@@ -84,13 +88,13 @@ bool BasicProcessWinConPTY::start(const std::string &cmd)
 	InitializeProcThreadAttributeList(nullptr, 1, 0, &attrSize);
 	if (attrSize == 0) {
 		DWORD error_code = GetLastError();
-		m->d = {};
+		m->d = { };
 		m->d.result.error_code = error_code;
 		m->d.result.error_message = misc::get_error_message(error_code);
 		return false;
 	}
 
-	STARTUPINFOEXW siEx = {};
+	STARTUPINFOEXW siEx = { };
 	siEx.StartupInfo.wShowWindow = SW_HIDE;
 	siEx.StartupInfo.cb = sizeof(siEx);
 	siEx.lpAttributeList = (LPPROC_THREAD_ATTRIBUTE_LIST)HeapAlloc(GetProcessHeap(), 0, attrSize);
@@ -99,7 +103,7 @@ bool BasicProcessWinConPTY::start(const std::string &cmd)
 		|| !UpdateProcThreadAttribute(siEx.lpAttributeList, 0, PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE, m->d.hPC, sizeof(m->d.hPC), nullptr, nullptr)) {
 		DWORD error_code = siEx.lpAttributeList ? GetLastError() : ERROR_NOT_ENOUGH_MEMORY;
 		if (siEx.lpAttributeList) HeapFree(GetProcessHeap(), 0, siEx.lpAttributeList);
-		m->d = {};
+		m->d = { };
 		m->d.result.error_code = error_code;
 		m->d.result.error_message = misc::get_error_message(error_code);
 		return false;
@@ -113,15 +117,15 @@ bool BasicProcessWinConPTY::start(const std::string &cmd)
 	}
 
 	m->d.running = CreateProcessW(nullptr,
-							  wcmd.data(),
-							  nullptr,
-							  nullptr,
-							  FALSE,
-							  creation_flags,
-							  nullptr,
-							  m->change_dir.empty() ? nullptr : m->change_dir.c_str(),
-							  &siEx.StartupInfo,
-							  &m->d.pi);
+		wcmd.data(),
+		nullptr,
+		nullptr,
+		FALSE,
+		creation_flags,
+		nullptr,
+		m->change_dir.empty() ? nullptr : m->change_dir.c_str(),
+		&siEx.StartupInfo,
+		&m->d.pi);
 	if (!m->d.running) {
 		DWORD error_code = GetLastError();
 		m->d.result.error_code = error_code;
@@ -139,12 +143,19 @@ bool BasicProcessWinConPTY::start(const std::string &cmd)
 	if (!m->d.running) {
 		DWORD error_code = m->d.result.error_code;
 		std::string error_message = std::move(m->d.result.error_message);
-		m->d = {};
+		m->d = { };
 		m->d.result.error_code = error_code;
 		m->d.result.error_message = std::move(error_message);
 		return false;
 	}
 	m->d.result.started = true;
+
+	// terminate() が wait() と競合しても安全なように、プロセスハンドルを
+	// スナップショットとして保持する (wait() がハンドルを閉じる直前にクリアする)。
+	{
+		std::lock_guard<std::mutex> lock(m->snap_mutex);
+		m->hProcess_snap = m->d.pi->hProcess;
+	}
 
 	HANDLE hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE);
 	HANDLE hStdInput = GetStdHandle(STD_INPUT_HANDLE);
@@ -153,7 +164,7 @@ bool BasicProcessWinConPTY::start(const std::string &cmd)
 	// PeekNamedPipeでデータの有無を確認してから読むことでReadFileの永久待機を避け、
 	// Git終了後にstop_input_でこのスレッドを確実に停止できるようにする。
 	m->stop_input = false;
-	m->input_writer = std::thread([this, hStdInput]{
+	m->input_writer = std::thread([this, hStdInput] {
 		if (IS_VALID_HANDLE(m->d.hPipeInWrite) && IS_VALID_HANDLE(hStdInput)) {
 			char buf[256];
 			while (!m->stop_input) {
@@ -171,8 +182,12 @@ bool BasicProcessWinConPTY::start(const std::string &cmd)
 				if (!ReadFile(hStdInput, buf, size, &n, nullptr) || n == 0) {
 					break;
 				}
-				if (!write_all(m->d.hPipeInWrite, buf, n)) {
-					break;
+				{
+					// close_input() / write_input() とハンドル競合しないように直列化する
+					std::lock_guard<std::mutex> lock(m->input_mutex);
+					if (!write_all(m->d.hPipeInWrite, buf, n)) {
+						break;
+					}
 				}
 			}
 		}
@@ -180,12 +195,12 @@ bool BasicProcessWinConPTY::start(const std::string &cmd)
 
 	// ConPTYの出力はプロセスの実行中から継続して排出する必要がある。
 	// VtStripperはスレッド内に値で保持し、ReadFile間で解析状態を維持する。
-	m->output_reader = std::thread([this, hStdOutput, vt_stripper = VtStripper{}]() mutable {
+	m->output_reader = std::thread([this, hStdOutput, vt_stripper = VtStripper { }]() mutable {
 		char buf[256];
 		DWORD n;
-// fprintf(stderr, "before ReadFile\n");
+		// fprintf(stderr, "before ReadFile\n");
 		while (ReadFile(m->d.hPipeOutRead, buf, sizeof(buf), &n, nullptr) && n > 0) {
-// fprintf(stderr, "ReadFile: %d\n", (int)n);
+			// fprintf(stderr, "ReadFile: %d\n", (int)n);
 			std::string_view view(buf, n);
 			std::string text;
 			if (m->options.vt_stripped) {
@@ -218,6 +233,10 @@ bool BasicProcessWinConPTY::start(const std::string &cmd)
 		m->d.result.error_code = error_code;
 		m->d.result.error_message = misc::get_error_message(error_code);
 		TerminateProcess(m->d.pi->hProcess, 128);
+		{
+			std::lock_guard<std::mutex> lock(m->snap_mutex);
+			m->hProcess_snap = nullptr;
+		}
 		m->d.pi.close();
 		m->stop_input = true;
 		if (m->input_writer.joinable()) {
@@ -230,7 +249,7 @@ bool BasicProcessWinConPTY::start(const std::string &cmd)
 		}
 		DWORD ec = m->d.result.error_code;
 		std::string msg = std::move(m->d.result.error_message);
-		m->d = {};
+		m->d = { };
 		m->d.result.error_code = ec;
 		m->d.result.error_message = std::move(msg);
 		return false;
@@ -246,6 +265,10 @@ BasicProcessWinConPTY::ExecResult BasicProcessWinConPTY::wait()
 		// Git終了後にClosePseudoConsoleすることでhPipeOutReadがEOFになる。
 		WaitForSingleObject(m->d.pi->hProcess, INFINITE);
 		GetExitCodeProcess(m->d.pi->hProcess, &m->d.result.exit_code);
+		{
+			std::lock_guard<std::mutex> lock(m->snap_mutex);
+			m->hProcess_snap = nullptr;
+		}
 		m->d.pi.close();
 
 		// 入力転送スレッドを先に止めてから、ConPTY入力の書き込み端を閉じる。
@@ -269,23 +292,33 @@ BasicProcessWinConPTY::ExecResult BasicProcessWinConPTY::wait()
 
 	auto ret = std::move(m->d.result);
 	m->last_exit_code = ret.exit_code;
-	m->d = {};
+	m->d = { };
 
 	return ret;
 }
 
+void BasicProcessWinConPTY::terminate()
+{
+	std::lock_guard<std::mutex> lock(m->snap_mutex);
+	if (IS_VALID_HANDLE(m->hProcess_snap)) {
+		TerminateProcess(m->hProcess_snap, 1);
+	}
+}
+
 void BasicProcessWinConPTY::close_input()
 {
+	std::lock_guard<std::mutex> lock(m->input_mutex);
 	if (IS_VALID_HANDLE(m->d.hPipeInWrite)) {
 		m->d.hPipeInWrite.close();
 	}
 }
 
-int BasicProcessWinConPTY::write_input(const char *ptr, int n)
+int BasicProcessWinConPTY::write_input(char const *ptr, int n)
 {
 	if (!ptr || n <= 0) {
 		return 0;
 	}
+	std::lock_guard<std::mutex> lock(m->input_mutex);
 	if (IS_VALID_HANDLE(m->d.hPipeInWrite)) {
 		if (write_all(m->d.hPipeInWrite, ptr, static_cast<size_t>(n))) {
 			return n;
@@ -337,4 +370,3 @@ bool BasicProcessWinConPTY::is_conpty_available()
 	if (!hKernel32) return false;
 	return GetProcAddress(hKernel32, "CreatePseudoConsole") != nullptr;
 }
-

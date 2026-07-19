@@ -1,29 +1,33 @@
 #include "ProcessWinPty.h"
+#include "ProcessHelper.h"
 #include <windows.h>
 #include <winpty.h>
-#include "ProcessHelper.h"
-#include "ProcessWinHelper.h"
+
+#include "ProcessWinHelper.h" // This file must be included after <windows.h>
 
 namespace {
 
 class OutputReaderThread2 {
 	friend class ::ProcessWinPty;
+
 private:
 	std::thread thread_;
-	std::atomic<bool> interrupted_{false};
+	std::atomic<bool> interrupted_ { false };
 	HANDLE handle_ = INVALID_HANDLE_VALUE;
-	std::deque<char> *output_queue_ = nullptr;
-	std::vector<char> *output_vector_ = nullptr;
+	std::function<void(char const *, size_t)> sink_;
+
 public:
 	~OutputReaderThread2()
 	{
 		wait();
 	}
-	void start(HANDLE hOutput, std::deque<char> *outq, std::vector<char> *outv)
+	// 読み取ったデータは sink_ 経由で AbstractPtyProcess::write_output に渡す。
+	// これにより出力バッファのロックが基底クラスの mutex_ に一元化される。
+	void start(HANDLE hOutput, std::function<void(char const *, size_t)> sink)
 	{
 		handle_ = hOutput;
-		output_queue_ = outq;
-		output_vector_ = outv;
+		sink_ = std::move(sink);
+		interrupted_ = false;
 		thread_ = std::thread([this]() {
 			char buf[1024];
 			while (1) {
@@ -34,8 +38,9 @@ public:
 				if (!ret || amount == 0) {
 					break;
 				}
-				output_queue_->insert(output_queue_->end(), buf, buf + amount);
-				output_vector_->insert(output_vector_->end(), buf, buf + amount);
+				if (sink_) {
+					sink_(buf, amount);
+				}
 			}
 		});
 	}
@@ -55,6 +60,8 @@ public:
 	void terminate()
 	{
 		interrupted_ = true;
+		// ReadFile でブロックしているスレッドを解放するためハンドルを閉じる
+		closeHandle();
 		wait();
 	}
 	void interrupt()
@@ -66,16 +73,16 @@ public:
 
 } // namespace
 
-
 // ProcessWinPty
 
 struct ProcessWinPty::Private {
-	std::atomic<bool> interrupted{false};
+	std::atomic<bool> interrupted { false };
 	std::thread thread;
 	std::mutex mutex;
 	std::condition_variable cv;
 	std::string command;
 	std::string env;
+	std::string error_message;
 	OutputReaderThread2 th_output_reader;
 	AutoHandle hProcess;
 	AutoHandle hOutput;
@@ -90,6 +97,8 @@ ProcessWinPty::ProcessWinPty()
 
 ProcessWinPty::~ProcessWinPty()
 {
+	// join されていない std::thread の破棄は std::terminate を呼ぶため、必ず止める
+	stop();
 	delete m;
 }
 
@@ -118,6 +127,7 @@ void ProcessWinPty::run()
 	winpty_config_t *agent_cfg = winpty_config_new(WINPTY_FLAG_PLAIN_OUTPUT, nullptr);
 	if (!agent_cfg) {
 		m->exit_code = 127;
+		m->error_message = "winpty_config_new failed";
 		notify_completed();
 		return;
 	}
@@ -125,6 +135,7 @@ void ProcessWinPty::run()
 	winpty_config_free(agent_cfg);
 	if (!pty) {
 		m->exit_code = 127;
+		m->error_message = "winpty_open failed";
 		fprintf(stderr, "Failed to open winpty\n");
 		notify_completed();
 		return;
@@ -134,11 +145,14 @@ void ProcessWinPty::run()
 	m->hOutput = CreateFileW(winpty_conout_name(pty), GENERIC_READ, 0, nullptr, OPEN_EXISTING, 0, nullptr);
 	if (!IS_VALID_HANDLE(m->hInput) || !IS_VALID_HANDLE(m->hOutput)) {
 		m->exit_code = 127;
+		m->error_message = "failed to open winpty conin/conout";
 		winpty_free(pty);
 		notify_completed();
 		return;
 	}
-	m->th_output_reader.start(m->hOutput, &output_queue_, &output_vector_);
+	m->th_output_reader.start(m->hOutput, [this](char const *buf, size_t len) {
+		write_output(buf, len);
+	});
 
 	std::vector<wchar_t> envbuf;
 #ifdef APP_GUITAR
@@ -152,13 +166,14 @@ void ProcessWinPty::run()
 	std::wstring wcmd = convert_str_to_wstr(m->command);
 
 	winpty_spawn_config_t *spawn_cfg = winpty_spawn_config_new(WINPTY_SPAWN_FLAG_AUTO_SHUTDOWN,
-															   program_p,
-															   (wchar_t const *)wcmd.data(),
-															   change_dir_.empty() ? nullptr : change_dir_.c_str(),
-															   envbuf.empty() ? nullptr : envbuf.data(),
-															   nullptr);
+		program_p,
+		(wchar_t const *)wcmd.data(),
+		change_dir_.empty() ? nullptr : change_dir_.c_str(),
+		envbuf.empty() ? nullptr : envbuf.data(),
+		nullptr);
 	if (!spawn_cfg) {
 		m->exit_code = 127;
+		m->error_message = "winpty_spawn_config_new failed";
 		m->th_output_reader.interrupt();
 		close_input();
 		winpty_free(pty);
@@ -169,6 +184,7 @@ void ProcessWinPty::run()
 	winpty_spawn_config_free(spawn_cfg);
 	if (!spawnSuccess) {
 		m->exit_code = 127;
+		m->error_message = "winpty_spawn failed";
 		m->th_output_reader.interrupt();
 		m->hOutput.close();
 	}
@@ -204,19 +220,7 @@ void ProcessWinPty::run()
 
 int ProcessWinPty::read_output(char *dstptr, int maxlen)
 {
-	if (!dstptr || maxlen <= 0) {
-		return 0;
-	}
-	size_t len = output_queue_.size();
-	if (len > maxlen) {
-		len = maxlen;
-	}
-	if (len > 0) {
-		auto begin = output_queue_.begin();
-		std::copy(begin, begin + len, dstptr);
-		output_queue_.erase(begin, begin + len);
-	}
-	return (int)len;
+	return pop_output(dstptr, maxlen);
 }
 
 void ProcessWinPty::write_input(char const *ptr, int len)
@@ -266,6 +270,8 @@ void ProcessWinPty::start(std::string const &cmdline, std::string const &env, bo
 	if (is_running()) return;
 	m->command = cmdline;
 	m->env = env;
+	m->error_message.clear();
+	m->interrupted = false;
 	m->thread = std::thread([&]() {
 		run();
 	});
@@ -275,8 +281,11 @@ int ProcessWinPty::wait()
 {
 	if (m->thread.joinable()) {
 		m->thread.join();
-		stdout_bytes_ = output_vector_;
-		stderr_bytes_ = {};
+		{
+			std::lock_guard<std::mutex> lock(mutex_);
+			stdout_bytes_ = output_vector_;
+		}
+		stderr_bytes_ = { };
 		return static_cast<int>(m->exit_code);
 	}
 	return 127;
@@ -284,10 +293,10 @@ int ProcessWinPty::wait()
 
 void ProcessWinPty::stop()
 {
-	// 標準出力読み出しスレッドを強制終了しないとwinptyプロセスが終了してくれない
-	m->th_output_reader.terminate();
-	// プロセススレッド停止
+	// プロセススレッドに中断を通知してから、出力読み出しスレッドを止める
+	// (ReadFile でブロックしていると winpty プロセスが終了してくれない)
 	m->interrupted = true;
+	m->th_output_reader.terminate();
 	wait();
 }
 
@@ -301,4 +310,7 @@ int ProcessWinPty::get_exit_code() const
 	return m->exit_code;
 }
 
-
+std::string const &ProcessWinPty::get_error_message() const
+{
+	return m->error_message;
+}

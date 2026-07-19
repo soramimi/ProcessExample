@@ -3,11 +3,11 @@
 
 #include "AbstractProcess.h"
 
-#include <thread>
-#include <mutex>
 #include <condition_variable>
-#include <vector>
 #include <cstdint>
+#include <mutex>
+#include <thread>
+#include <vector>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -29,13 +29,14 @@ public:
 		DWORD error_code = ERROR_SUCCESS;
 #else
 		uint32_t exit_code = static_cast<uint32_t>(-1);
-		uint32_t error_code = 0; //ERROR_SUCCESS;
+		uint32_t error_code = 0; // ERROR_SUCCESS;
 #endif
 		std::string error_message;
 	};
-	virtual ~_AbstractBasicProcess() {}
+	virtual ~_AbstractBasicProcess() { }
 	virtual bool start(std::string const &cmd) = 0;
 	virtual ExecResult wait() = 0;
+	virtual void terminate() = 0;
 	virtual void close_input() = 0;
 	virtual int write_input(char const *ptr, int n) = 0;
 	virtual int read_output(char *ptr, int n) = 0;
@@ -48,8 +49,10 @@ class BasicProcessWin : public _AbstractBasicProcess {
 private:
 	struct Private;
 	Private *m;
+
 public:
 	struct Options {
+		bool no_window = true;
 		bool output_stdout = false;
 		bool output_vector = false;
 		bool output_queue = false;
@@ -61,6 +64,7 @@ public:
 	bool is_running() const;
 	bool start(std::string const &cmd);
 	ExecResult wait();
+	void terminate();
 	void close_input();
 	int write_input(char const *ptr, int n);
 	int read_output(char *ptr, int n);
@@ -69,7 +73,8 @@ public:
 
 	bool wait_for_output(std::string const &text);
 
-	void set_completion_callback(std::function<void (bool, std::shared_ptr<void>)> const &fn, std::shared_ptr<void> user_data);
+	// start() 前に設定すること。実行中の変更はスレッドセーフではない。
+	void set_completion_callback(std::function<void(bool, std::shared_ptr<void>)> const &fn, std::shared_ptr<void> user_data);
 	void notify_completed();
 };
 

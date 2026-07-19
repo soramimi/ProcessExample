@@ -1,19 +1,20 @@
-#include "BasicProcessWinConPTY.h"
 #include "ProcessConPtyWithWorker.h"
+#include "BasicProcessWinConPTY.h"
+#include <algorithm>
+#include <atomic>
 #include <base64.h>
 #include <misc.h>
-#include <algorithm>
 
 //
 
 #include <windows.h>
-#include "ProcessWinHelper.h"
+#include "ProcessWinHelper.h" // This file must be included after <windows.h>
 
 struct ProcessConPtyWithWorker::Private {
 	std::condition_variable cv;
 	BasicProcessWin proc;
 	bool started = false;
-	bool running = false;
+	std::atomic<bool> running { false }; // 完了コールバックがワーカー側スレッドから更新するため atomic
 	int exit_code = -1;
 };
 
@@ -31,7 +32,7 @@ ProcessConPtyWithWorker::~ProcessConPtyWithWorker()
 	delete m;
 }
 
-void ProcessConPtyWithWorker::set_options(const BasicProcessWin::Options &options)
+void ProcessConPtyWithWorker::set_options(BasicProcessWin::Options const &options)
 {
 	m->proc.set_options(options);
 }
@@ -43,6 +44,9 @@ int ProcessConPtyWithWorker::run_worker(int argc, char **argv)
 	BasicProcessWinConPTY::Options opts;
 	std::string_view encoded;
 
+	// ワーカー側のエラー (引数不正・デコード失敗・起動失敗) は 126 を返す。
+	// 子プロセス自身の終了コードと区別できるようにするため (シェルの
+	// 「コマンドを実行できない」慣習に合わせた)。128 は子が返しうる値なので使わない。
 	int argi = 1;
 	while (argi < argc) {
 		std::string_view arg = argv[argi++];
@@ -51,33 +55,39 @@ int ProcessConPtyWithWorker::run_worker(int argc, char **argv)
 				encoded = argv[argi++];
 				as_worker = true;
 			} else {
-				return 128;
+				return 126;
 			}
 		} else if (arg == "--no-window") {
 			opts.no_window = true;
 		} else {
-			return 128;
+			return 126;
 		}
 	}
 
 	if (as_worker && !encoded.empty()) {
 		std::vector<char> decoded;
-		Base64::decode(encoded.data(), encoded.size(), &decoded);
+		if (!Base64::decode_checked(encoded.data(), encoded.size(), &decoded)) {
+			return 126;
+		}
 		std::string cmd(decoded.data(), decoded.size());
+		// 空コマンドや NUL 混入は不正な引数として拒否する
+		if (cmd.empty() || cmd.find('\0') != std::string::npos) {
+			return 126;
+		}
 		opts.output_stdout = true;
 		BasicProcessWinConPTY conpty(opts);
 		conpty.start(cmd);
 		auto result = conpty.wait();
 		if (!result.started) {
-			return 128;
+			return 126;
 		}
 		return static_cast<int>(result.exit_code);
 	}
 
-	return 128; // not worker mode
+	return 126; // not worker mode
 }
 
-void ProcessConPtyWithWorker::start(const std::string &command, const std::string &env, bool /*use_input*/)
+void ProcessConPtyWithWorker::start(std::string const &command, std::string const &env, bool /*use_input*/)
 {
 	(void)env;
 	stop();
@@ -116,11 +126,9 @@ void ProcessConPtyWithWorker::start(const std::string &command, const std::strin
 		return;
 	}
 
-	std::string cmd = misc::build_command_line({
-		executable,
+	std::string cmd = misc::build_command_line({ executable,
 		std::string(subprocess_tag),
-		base64_encode(command)
-	});
+		base64_encode(command) });
 
 	m->proc.set_completion_callback([this](bool started, std::shared_ptr<void> user_data) {
 		(void)started;
@@ -128,7 +136,8 @@ void ProcessConPtyWithWorker::start(const std::string &command, const std::strin
 		m->running = false;
 		m->cv.notify_all();
 		this->notify_completed();
-	}, this->user_data_);
+	},
+		this->user_data_);
 
 	m->proc.set_change_dir(change_dir_);
 	m->started = m->proc.start(cmd);
@@ -143,14 +152,13 @@ void ProcessConPtyWithWorker::start(const std::string &command, const std::strin
 bool ProcessConPtyWithWorker::wait(unsigned long time)
 {
 	std::unique_lock<std::mutex> lock(mutex_);
-	m->cv.wait_for(lock, std::chrono::milliseconds(time), [this]() { return !m->running; });
-	return true;
+	return m->cv.wait_for(lock, std::chrono::milliseconds(time), [this]() { return !m->running.load(); });
 }
 
 int ProcessConPtyWithWorker::wait()
 {
 	m->proc.wait();
-	
+
 	std::lock_guard<std::mutex> lock(mutex_);
 	std::vector<char> const &out = m->proc.stdout_bytes();
 	stdout_bytes_ = out;
@@ -165,6 +173,7 @@ void ProcessConPtyWithWorker::stop()
 	std::lock_guard<std::mutex> lock(mutex_);
 	if (m->running) {
 		m->proc.close_input();
+		m->proc.terminate();
 		m->proc.wait();
 		m->running = false;
 		std::vector<char> const &out = m->proc.stdout_bytes();
@@ -204,7 +213,6 @@ int ProcessConPtyWithWorker::read_output(char *ptr, int len)
 	}
 	int n = m->proc.read_output(ptr, len);
 	return n;
-	return 0;
 }
 
 void ProcessConPtyWithWorker::close_input()

@@ -3,13 +3,14 @@
 #define PROCESSWINPTY_H
 #include "AbstractProcess.h"
 
-
 class ProcessWinPty : public AbstractPtyProcess {
 private:
 	struct Private;
 	Private *m;
+
 protected:
 	void run();
+
 public:
 	ProcessWinPty();
 	~ProcessWinPty() override;
@@ -21,6 +22,7 @@ public:
 	void stop() override;
 	int wait();
 	int get_exit_code() const override;
+	std::string const &get_error_message() const;
 
 	// AbstractPtyProcess interface
 public:
@@ -30,6 +32,5 @@ public:
 		return wait() == 0;
 	}
 };
-
 
 #endif // PROCESSWINPTY_H

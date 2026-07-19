@@ -16,6 +16,7 @@ class PushDir {
 private:
 	dir_string_t cwd_;
 	static void chdir(dir_string_t const &dir);
+
 public:
 	PushDir() = default;
 	PushDir(dir_string_t const &dir);
@@ -24,6 +25,7 @@ public:
 	void popd();
 };
 
-}} // namespace process::helper
+}
+} // namespace process::helper
 
 #endif // PROCESSHELPER_H

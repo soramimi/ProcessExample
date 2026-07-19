@@ -3,11 +3,11 @@
 
 #include "BasicProcessWin.h"
 
-
 class BasicProcessWinConPTY : public _AbstractBasicProcess {
 private:
 	struct Private;
 	Private *m;
+
 public:
 	struct Options {
 		bool no_window = false;
@@ -24,6 +24,7 @@ public:
 
 	bool start(std::string const &cmd);
 	ExecResult wait();
+	void terminate();
 	void close_input();
 	int write_input(char const *ptr, int n);
 	int read_output(char *ptr, int len);

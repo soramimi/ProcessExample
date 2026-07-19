@@ -166,17 +166,17 @@ static inline void base64_decode(char const *src, std::vector<char> *out)
 	Base64::decode((char const *)src, strlen(src), out);
 }
 
-static inline std::string base64_encode(std::string const &src)
+static inline std::string base64_encode(std::string_view const &src)
 {
 	std::vector<char> vec;
-	base64_encode((char const *)src.c_str(), src.size(), &vec);
+	base64_encode((char const *)src.data(), src.size(), &vec);
 	return Base64::_to_s_(&vec);
 }
 
-static inline std::string base64_decode(std::string const &src)
+static inline std::string base64_decode(std::string_view const &src)
 {
 	std::vector<char> vec;
-	base64_decode((char const *)src.c_str(), src.size(), &vec);
+	base64_decode((char const *)src.data(), src.size(), &vec);
 	return Base64::_to_s_(&vec);
 }
 

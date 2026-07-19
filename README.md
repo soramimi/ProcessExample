@@ -1,65 +1,71 @@
 # ProcessExample
 
-A C++ sample project that demonstrates various techniques for spawning a child process and capturing its output. The program runs `git --version` as a concrete example and prints the result to stdout.
+A multiplatform C++ library for spawning child processes and capturing their output, together with a sample application that exercises the library. The project started as an experiment with Windows ConPTY and is being reorganized as a reusable process-launching library for applications.
 
-## Motivation
+The sample program runs `git --version` through each available backend and prints the captured output.
 
-Different platforms and use cases call for different IPC approaches. This project compares them side-by-side so you can understand the trade-offs:
+## Features
 
-| Function | Platform | Method |
-|---|---|---|
-| `exec_git_posix()` | Linux / macOS | `pipe()` + `fork()` + `execvp()` |
-| `exec_git_posixpty()` | Linux / macOS | `forkpty()` — pseudo-terminal |
-| `exec_git_win()` | Windows | `CreatePipe()` + `CreateProcessW()` |
-| `exec_git_winpty()` | Windows | [winpty](https://github.com/rprichard/winpty) pseudo-terminal |
-| `exec_git_conpty()` | Windows 10+ | `CreatePseudoConsole()` (ConPTY) |
+| Class | Platform | Method | Interface |
+|---|---|---|---|
+| `BasicProcessWin` | Windows | Anonymous pipes + `CreateProcessW` (stdout/stderr merged) | `_AbstractBasicProcess` |
+| `BasicProcessWinConPTY` | Windows 10 1809+ | `CreatePseudoConsole` (ConPTY) | `_AbstractBasicProcess` |
+| `ProcessWin` | Windows | Pipes + `CreateProcessW` (separate stdout/stderr queues) | `AbstractProcess` |
+| `ProcessWinConPty` | Windows 10 1809+ | ConPTY behind the abstract PTY interface | `AbstractPtyProcess` |
+| `ProcessWinPty` | Windows | [winpty](https://github.com/rprichard/winpty) (legacy/compat) | `AbstractPtyProcess` |
+| `ProcessConPtyWithWorker` | Windows 10 1809+ | ConPTY hosted in a separate `conpty-worker.exe` | `AbstractPtyProcess` |
+| `ProcessPosix` | Linux / macOS | `pipe()` + `fork()` + `execvp()` (separate stdout/stderr) | `AbstractProcess` |
+| `ProcessPosixPty` | Linux / macOS | `posix_openpt()` pseudo-terminal | `AbstractPtyProcess` |
 
-## Why pseudo-terminals?
+### Interfaces
+
+- `AbstractProcess` — plain pipe-based process. Final output is read from `stdout_bytes()` / `stderr_bytes()` after `wait()`.
+- `AbstractPtyProcess` — pseudo-terminal process. Adds an incremental `read_output()` queue, a completion callback, and a change-directory setting on top of the result buffers.
+- `_AbstractBasicProcess` — low-level Windows interface with configurable output sinks (`Options::output_stdout` / `output_vector` / `output_queue`) and a `wait_for_output()` prompt watcher (`BasicProcessWin`).
+
+### Why pseudo-terminals?
 
 Plain pipes only capture stdout/stderr. Some programs (including Git in certain configurations) detect that their output is not a terminal and change their behavior — e.g., disabling color or progress output. Using a pseudo-terminal (PTY) makes the child process behave as if it is writing to a real terminal.
 
-### VT / ANSI escape sequence stripping
+VT/ANSI escape sequences emitted on a PTY are removed by the stateful `VtStripper` class (`src/ProcessWinHelper.h`) on the ConPTY backend. It keeps its parsing state across `ReadFile` calls, so sequences split over chunk boundaries are handled correctly.
 
-When a PTY is used, the child process may emit VT100/ANSI escape sequences (color codes, cursor movement) or OSC (Operating System Command) sequences such as terminal title updates:
+### ConPTY worker separation
 
+`ProcessConPtyWithWorker` launches `conpty-worker.exe` (built from the same `sampleapp/main.cpp` with `CONPTY_WORKER` defined) through ordinary pipes, and the worker owns the ConPTY. This avoids interference between an outer pseudo-terminal (e.g. an IDE-embedded terminal) and the inner ConPTY. The command line is passed to the worker as a Base64-encoded argument and validated with strict Base64 decoding on the worker side.
+
+## Building
+
+qmake project files:
+
+```sh
+# library + sample app
+qmake process-example.pro
+make            # or nmake / jom with MSVC on Windows
+
+# Windows only: ConPTY worker executable
+qmake conpty-worker.pro
+make
 ```
-ESC ] 0 ; <title string> BEL
-```
 
-The helper function `strip_vt()` removes both CSI sequences (`ESC [`) and OSC sequences (`ESC ]`) from the output so that plain text is returned to the caller.
+Outputs go to `_bin/`. On Windows, `ProcessConPtyWithWorker` requires `conpty-worker.exe` to be placed next to the main executable.
 
 ## Dependencies
 
-### winpty (Windows)
-
-Pre-built binaries and headers are bundled under `winpty/`:
-
-```
-winpty/
-  include/   winpty.h, winpty_constants.h
-  x64/lib/   winpty.lib
-  x64/bin/   winpty.dll, winpty-agent.exe
-  ia32/      (32-bit equivalents)
-```
-
-Source: https://github.com/rprichard/winpty
-
-### ConPTY (Windows 10 version 1809+)
-
-`CreatePseudoConsole` is part of `kernel32.dll` on Windows 10 (build 17763) and later. The function `is_conpty_available()` checks for its presence at runtime so the binary can fall back gracefully on older systems.
-
-### Requirements
-
-- C++11 or later
-- Windows: MSVC or MinGW, Windows SDK with ConPTY support (`EXTENDED_STARTUPINFO_PRESENT`)
-- Linux / macOS: `libutil` (for `forkpty`)
+- C++17
+- Windows: MSVC or MinGW; Windows 10 version 1809+ for the ConPTY backends (`BasicProcessWinConPTY::is_conpty_available()` checks at runtime)
+- winpty (Windows, legacy backend): pre-built headers/libs bundled under `winpty/`
+- Linux / macOS: nothing special (`posix_openpt`, `fork`, `execvp`)
 
 ## Project Structure
 
 ```
-main.cpp            — all implementations
-main.h              — (reserved)
-process-example.pro — qmake project file
-winpty/             — bundled winpty library
-_bin/               — build output
+process-example.pro   — qmake project for the sample app
+conpty-worker.pro     — qmake project for the Windows ConPTY worker
+process.pri           — shared qmake fragment listing the library sources
+src/                  — the process library
+sampleapp/            — sample/experimental application (main.cpp and helpers)
+winpty/               — bundled winpty library
+_bin/                 — build output
 ```
+
+See `AGENTS.md` for implementation details and `ConPTY.md` for the ConPTY experiment notes.

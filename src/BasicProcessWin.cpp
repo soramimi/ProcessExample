@@ -1,12 +1,14 @@
 #include "BasicProcessWin.h"
-#include <misc.h>
-#include <thread>
-#include <mutex>
+#include <algorithm>
 #include <condition_variable>
 #include <memory>
+#include <misc.h>
+#include <mutex>
+#include <string_view>
+#include <thread>
 
 #include "ProcessHelper.h"
-#include "ProcessWinHelper.h"
+#include "ProcessWinHelper.h" // This file must be included after <windows.h>
 
 std::string misc::get_error_message(uint32_t error_code)
 {
@@ -69,14 +71,13 @@ std::string misc::build_command_line(std::vector<std::string> const &args)
 	return cmd;
 }
 
-
 // BasicProcessWin
 
 struct BasicProcessWin::Private {
 	BasicProcessWin::Options options;
 	process::helper::dir_string_t change_dir;
 	std::shared_ptr<void> user_data;
-	std::function<void (bool, std::shared_ptr<void>)> completed_fn;
+	std::function<void(bool, std::shared_ptr<void>)> completed_fn;
 
 	struct D {
 		AutoHandle hInputWrite;
@@ -93,6 +94,9 @@ struct BasicProcessWin::Private {
 	std::thread output_reader;
 	std::mutex output_mutex;
 	std::condition_variable output_changed;
+	std::mutex input_mutex;
+	std::mutex snap_mutex;
+	HANDLE hProcess_snap = nullptr;
 	DWORD last_exit_code = static_cast<DWORD>(-1);
 	PROCESS_INFORMATION &pi()
 	{
@@ -109,11 +113,12 @@ BasicProcessWin::BasicProcessWin(BasicProcessWin::Options const &options)
 BasicProcessWin::~BasicProcessWin()
 {
 	close_input();
+	terminate();
 	wait();
 	delete m;
 }
 
-void BasicProcessWin::set_change_dir(const process::helper::dir_string_t &dir)
+void BasicProcessWin::set_change_dir(process::helper::dir_string_t const &dir)
 {
 	m->change_dir = dir;
 }
@@ -123,7 +128,7 @@ void BasicProcessWin::set_options(Options const &options)
 	m->options = options;
 }
 
-void BasicProcessWin::set_completion_callback(const std::function<void (bool, std::shared_ptr<void>)> &fn, std::shared_ptr<void> user_data)
+void BasicProcessWin::set_completion_callback(std::function<void(bool, std::shared_ptr<void>)> const &fn, std::shared_ptr<void> user_data)
 {
 	m->completed_fn = fn;
 	m->user_data = user_data;
@@ -136,7 +141,7 @@ void BasicProcessWin::notify_completed()
 	}
 }
 
-bool BasicProcessWin::start(const std::string &cmd)
+bool BasicProcessWin::start(std::string const &cmd)
 {
 	wait();
 
@@ -154,20 +159,20 @@ bool BasicProcessWin::start(const std::string &cmd)
 	// HANDLE _hInputRead = nullptr;
 	AutoHandle hInputRead;
 	AutoHandle hOutputWrite;
-	SECURITY_ATTRIBUTES sa = {};
+	SECURITY_ATTRIBUTES sa = { };
 	sa.nLength = sizeof(sa);
 	sa.bInheritHandle = TRUE;
 
 	if (!CreatePipe(&hInputRead, &m->d.hInputWrite, &sa, 0)) {
 		DWORD error_code = GetLastError();
-		m->d = {};
+		m->d = { };
 		m->d.result.error_code = error_code;
 		m->d.result.error_message = misc::get_error_message(error_code);
 		return false;
 	}
 	if (!CreatePipe(&m->d.hOutputRead, &hOutputWrite, &sa, 0)) {
 		DWORD error_code = GetLastError();
-		m->d = {};
+		m->d = { };
 		m->d.result.error_code = error_code;
 		m->d.result.error_message = misc::get_error_message(error_code);
 		return false;
@@ -175,13 +180,13 @@ bool BasicProcessWin::start(const std::string &cmd)
 	if (!SetHandleInformation(m->d.hInputWrite, HANDLE_FLAG_INHERIT, 0)
 		|| !SetHandleInformation(m->d.hOutputRead, HANDLE_FLAG_INHERIT, 0)) {
 		DWORD error_code = GetLastError();
-		m->d = {};
+		m->d = { };
 		m->d.result.error_code = error_code;
 		m->d.result.error_message = misc::get_error_message(error_code);
 		return false;
 	}
 
-	STARTUPINFOW si = {};
+	STARTUPINFOW si = { };
 	si.cb = sizeof(si);
 	si.dwFlags = STARTF_USESTDHANDLES;
 	si.wShowWindow = SW_HIDE;
@@ -189,30 +194,36 @@ bool BasicProcessWin::start(const std::string &cmd)
 	si.hStdOutput = hOutputWrite;
 	si.hStdError = hOutputWrite;
 
+	DWORD creation_flags = CREATE_UNICODE_ENVIRONMENT;
+	if (m->options.no_window) {
+		creation_flags |= CREATE_NO_WINDOW;
+	}
+
 	std::wstring wcmd = convert_str_to_wstr(cmd);
-	BOOL ok = CreateProcessW(
-				  nullptr, wcmd.data(),
-				  nullptr, nullptr,
-				  TRUE, CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT,
-				  nullptr, nullptr,
-				  &si, &m->d.pi
-				  );
+	BOOL ok = CreateProcessW(nullptr, wcmd.data(), nullptr, nullptr, TRUE, creation_flags, nullptr, nullptr, &si, &m->d.pi);
 
 	hInputRead.close();
 	hOutputWrite.close();
 
 	if (!ok) {
 		DWORD error_code = GetLastError();
-		m->d = {};
+		m->d = { };
 		m->d.result.error_code = error_code;
 		m->d.result.error_message = misc::get_error_message(error_code);
 		return false;
 	}
 
+	// terminate() が wait() と競合しても安全なように、プロセスハンドルを
+	// スナップショットとして保持する (wait() がハンドルを閉じる直前にクリアする)。
+	{
+		std::lock_guard<std::mutex> lock(m->snap_mutex);
+		m->hProcess_snap = m->pi().hProcess;
+	}
+
 	HANDLE hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE);
 	// ワーカー出力を実行中から排出する。蓄積した文字列はプロンプト検出にも使い、
 	// 同じデータを監督プロセスのstdoutへ逐次中継する。
-	m->output_reader = std::thread([this, hStdOutput]{
+	m->output_reader = std::thread([this, hStdOutput] {
 		char buf[256];
 		DWORD n;
 		while (ReadFile(m->d.hOutputRead, buf, sizeof(buf), &n, nullptr) && n > 0) {
@@ -255,6 +266,10 @@ _AbstractBasicProcess::ExecResult BasicProcessWin::wait()
 			m->d.result.exit_code = ec;
 		}
 	}
+	{
+		std::lock_guard<std::mutex> lock(m->snap_mutex);
+		m->hProcess_snap = nullptr;
+	}
 	m->d.pi.close();
 
 	if (m->output_reader.joinable()) {
@@ -268,36 +283,59 @@ _AbstractBasicProcess::ExecResult BasicProcessWin::wait()
 
 	auto ret = std::move(m->d.result);
 	m->last_exit_code = ret.exit_code;
-	m->d = {};
+	m->d = { };
 
 	return ret;
 }
 
-bool BasicProcessWin::wait_for_output(const std::string &text)
+void BasicProcessWin::terminate()
 {
-	// プロンプトが複数回のReadFileに分割されても、連結済みoutput_から検索できる。
-	// ワーカーが先に終了した場合はoutput_closed_で待機を解除する。
+	std::lock_guard<std::mutex> lock(m->snap_mutex);
+	if (IS_VALID_HANDLE(m->hProcess_snap)) {
+		TerminateProcess(m->hProcess_snap, 1);
+	}
+}
+
+bool BasicProcessWin::wait_for_output(std::string const &text)
+{
+	// プロンプトが複数回のReadFileに分割されても、連結済みoutput_vectorから検索できる。
+	// ワーカーが先に終了した場合はoutput_closedで待機を解除する。
+	// 通知のたびに全量を文字列化するとO(n^2)になるため、検索済み位置を保持し、
+	// テキストがチャンク境界をまたぐ場合に備えて text.size()-1 だけ遡って再検索する。
 	std::unique_lock<std::mutex> lock(m->output_mutex);
-	std::string s;
-	m->output_changed.wait(lock, [&]{
-		s = std::string(m->d.output_vector.begin(), m->d.output_vector.end());
-		return s.find(text) != std::string::npos || m->d.output_closed;
+	size_t searched = 0;
+	bool found = false;
+	m->output_changed.wait(lock, [&] {
+		size_t total = m->d.output_vector.size();
+		if (searched < total) {
+			size_t overlap = text.empty() ? 0 : text.size() - 1;
+			size_t begin = searched > overlap ? searched - overlap : 0;
+			std::string_view view(m->d.output_vector.data() + begin, total - begin);
+			if (view.find(text) != std::string_view::npos) {
+				found = true;
+				return true;
+			}
+			searched = total;
+		}
+		return m->d.output_closed;
 	});
-	return s.find(text) != std::string::npos;
+	return found;
 }
 
 void BasicProcessWin::close_input()
 {
+	std::lock_guard<std::mutex> lock(m->input_mutex);
 	if (IS_VALID_HANDLE(m->d.hInputWrite)) {
 		m->d.hInputWrite.close();
 	}
 }
 
-int BasicProcessWin::write_input(const char *ptr, int n)
+int BasicProcessWin::write_input(char const *ptr, int n)
 {
 	if (!ptr || n <= 0) {
 		return 0;
 	}
+	std::lock_guard<std::mutex> lock(m->input_mutex);
 	if (IS_VALID_HANDLE(m->d.hInputWrite)) {
 		if (write_all(m->d.hInputWrite, ptr, static_cast<size_t>(n))) {
 			return n;
@@ -338,4 +376,3 @@ int BasicProcessWin::get_exit_code() const
 {
 	return static_cast<int>(m->last_exit_code);
 }
-

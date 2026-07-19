@@ -1,7 +1,8 @@
 
-#include <windows.h>
 #include "ProcessWin.h"
-#include "ProcessWinHelper.h"
+#include <atomic>
+#include <windows.h>
+#include "ProcessWinHelper.h" // This file must be included after <windows.h>
 
 namespace {
 
@@ -11,6 +12,7 @@ private:
 	std::thread thread_;
 	std::mutex *mutex_;
 	std::deque<char> *buffer_;
+
 public:
 	OutputReaderThread(HANDLE hRead, std::mutex *mutex, std::deque<char> *buffer)
 		: hRead_(hRead)
@@ -24,7 +26,7 @@ public:
 	}
 	void start()
 	{
-		thread_ = std::thread([this](){
+		thread_ = std::thread([this]() {
 			char buf[4096];
 			while (1) {
 				DWORD len = 0;
@@ -50,20 +52,23 @@ public:
 };
 
 class ProcessWinThread {
-	friend class ProcessWin2;
 public:
 	std::thread thread_;
 	std::mutex *mutex_ = nullptr;
 	std::string command_;
 	DWORD exit_code_ = -1;
+	DWORD error_code_ = ERROR_SUCCESS;
+	std::string error_message_;
 	std::vector<char> input_;
 	std::deque<char> outq_;
 	std::deque<char> errq_;
 	bool use_input_ = false;
 	AutoHandle hInputWrite_;
-	bool close_input_later_ = false;
+	std::atomic<bool> close_input_later_ { false };
+	std::mutex snap_mutex_;
+	HANDLE hProcess_snap_ = nullptr;
 
-	// 環境変数をキャッシュして再利用
+	// 環境変数をキャッシュして再利用 (初回起動時の環境を使い続けることに注意)
 	static std::vector<wchar_t> cached_env_;
 	static std::mutex env_mutex_;
 
@@ -72,6 +77,8 @@ public:
 		mutex_ = nullptr;
 		command_.clear();
 		exit_code_ = -1;
+		error_code_ = ERROR_SUCCESS;
+		error_message_.clear();
 		input_.clear();
 		outq_.clear();
 		errq_.clear();
@@ -86,11 +93,29 @@ public:
 	}
 	~ProcessWinThread()
 	{
+		terminate();
 		stop();
+	}
+	// mutex_ 配下で呼ぶ (スレッドの書き込みループが mutex_ を保持しているため)
+	void closeInputLocked()
+	{
+		hInputWrite_.close();
 	}
 	void closeInput()
 	{
-		hInputWrite_.close();
+		if (mutex_) {
+			std::lock_guard<std::mutex> lock(*mutex_);
+			hInputWrite_.close();
+		} else {
+			hInputWrite_.close();
+		}
+	}
+	void terminate()
+	{
+		std::lock_guard<std::mutex> lock(snap_mutex_);
+		if (IS_VALID_HANDLE(hProcess_snap_)) {
+			TerminateProcess(hProcess_snap_, 1);
+		}
 	}
 	void writeInput(char const *ptr, int len)
 	{
@@ -100,8 +125,10 @@ public:
 	}
 	void start()
 	{
-		thread_ = std::thread([this](){
+		thread_ = std::thread([this]() {
 			hInputWrite_.close();
+			error_code_ = ERROR_SUCCESS;
+			error_message_.clear();
 
 			AutoHandle hOutputRead;
 			AutoHandle hOutputWrite;
@@ -118,27 +145,41 @@ public:
 
 			std::vector<wchar_t> *env_ptr = nullptr;
 
+			auto fail = [this](char const *what) {
+				DWORD ec = GetLastError();
+				error_code_ = ec;
+				error_message_ = std::string(what) + ": " + misc::get_error_message(ec);
+			};
+
 			std::wstring wcmd(convert_str_to_wstr(command_));
 			if (wcmd.empty()) {
+				error_message_ = "empty command";
 				return;
 			}
 
 			// パイプ作成の最適化
-			static constexpr DWORD PIPE_BUFFER_SIZE = 65536;
+			constexpr static DWORD PIPE_BUFFER_SIZE = 65536;
 
-			if (!CreatePipe(&hInputRead, &hInputWrite, &sa, PIPE_BUFFER_SIZE))
+			if (!CreatePipe(&hInputRead, &hInputWrite, &sa, PIPE_BUFFER_SIZE)) {
+				fail("CreatePipe (stdin)");
 				return;
+			}
 
-			if (!CreatePipe(&hOutputRead, &hOutputWrite, &sa, PIPE_BUFFER_SIZE))
+			if (!CreatePipe(&hOutputRead, &hOutputWrite, &sa, PIPE_BUFFER_SIZE)) {
+				fail("CreatePipe (stdout)");
 				return;
+			}
 
-			if (!CreatePipe(&hErrorRead, &hErrorWrite, &sa, PIPE_BUFFER_SIZE))
+			if (!CreatePipe(&hErrorRead, &hErrorWrite, &sa, PIPE_BUFFER_SIZE)) {
+				fail("CreatePipe (stderr)");
 				return;
+			}
 
 			// ハンドルの継承可能性を最適化
 			if (!SetHandleInformation(hInputWrite, HANDLE_FLAG_INHERIT, 0)
 				|| !SetHandleInformation(hOutputRead, HANDLE_FLAG_INHERIT, 0)
 				|| !SetHandleInformation(hErrorRead, HANDLE_FLAG_INHERIT, 0)) {
+				fail("SetHandleInformation");
 				return;
 			}
 
@@ -165,9 +206,21 @@ public:
 						cached_env_.assign(p, p + i + 1);
 						FreeEnvironmentStringsW(p);
 
-						// LANG=en_US.UTF8を追加
-						wchar_t const *e = L"LANG=en_US.UTF8";
-						cached_env_.insert(cached_env_.end() - 1, e, e + wcslen(e) + 1);
+						// LANG=en_US.UTF8を追加 (既にLANGがあれば追加しない)
+						bool has_lang = false;
+						for (size_t j = 0; j < cached_env_.size() && cached_env_[j];) {
+							wchar_t const *entry = &cached_env_[j];
+							size_t len = wcslen(entry);
+							if (wcsncmp(entry, L"LANG=", 5) == 0) {
+								has_lang = true;
+								break;
+							}
+							j += len + 1;
+						}
+						if (!has_lang) {
+							wchar_t const *e = L"LANG=en_US.UTF8";
+							cached_env_.insert(cached_env_.end() - 1, e, e + wcslen(e) + 1);
+						}
 					}
 				}
 				env_ptr = cached_env_.empty() ? nullptr : &cached_env_;
@@ -177,6 +230,7 @@ public:
 			DWORD creation_flags = CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT;
 
 			if (!CreateProcessW(nullptr, wcmd.data(), nullptr, nullptr, TRUE, creation_flags, env_ptr ? env_ptr->data() : nullptr, nullptr, &si, &pi)) {
+				fail("CreateProcessW");
 				return;
 			}
 
@@ -185,10 +239,18 @@ public:
 			hOutputWrite.close();
 			hErrorWrite.close();
 
+			// terminate() がハンドルクローズと競合しないようスナップショットを保持する
+			{
+				std::lock_guard<std::mutex> lock(snap_mutex_);
+				hProcess_snap_ = pi->hProcess;
+			}
+
+			// 書き込みハンドルをメンバに移し、実行中の closeInput() が機能するようにする
+			hInputWrite_ = hInputWrite.detach();
+
 			if (!use_input_) {
 				closeInput();
 			}
-
 
 			{
 				OutputReaderThread t1(hOutputRead, mutex_, &outq_);
@@ -196,7 +258,7 @@ public:
 				t1.start();
 				t2.start();
 
-				HANDLE handles[] = {pi->hProcess};
+				HANDLE handles[] = { pi->hProcess };
 				while (1) {
 					DWORD wait_result = WaitForMultipleObjects(1, handles, FALSE, 10);
 					if (wait_result == WAIT_OBJECT_0) break;
@@ -205,14 +267,14 @@ public:
 					{
 						std::lock_guard lock(*mutex_);
 						if (!input_.empty()) {
-							if (IS_VALID_HANDLE(hInputWrite)) {
-								if (!write_all(hInputWrite, input_.data(), input_.size())) {
-									closeInput();
+							if (IS_VALID_HANDLE(hInputWrite_)) {
+								if (!write_all(hInputWrite_, input_.data(), input_.size())) {
+									closeInputLocked();
 								}
 								input_.clear();
 							}
 						} else if (close_input_later_) {
-							closeInput();
+							closeInputLocked();
 						}
 					}
 				}
@@ -224,10 +286,12 @@ public:
 				hErrorRead.close();
 
 				GetExitCodeProcess(pi->hProcess, &exit_code_);
+				{
+					std::lock_guard<std::mutex> lock(snap_mutex_);
+					hProcess_snap_ = nullptr;
+				}
 				pi.close();
 			}
-
-			hInputWrite_ = hInputWrite.detach();
 		});
 	}
 	void stop()
@@ -246,9 +310,9 @@ public:
 std::vector<wchar_t> ProcessWinThread::cached_env_;
 std::mutex ProcessWinThread::env_mutex_;
 
-std::string toQString(const std::vector<char> &vec)
+std::string toQString(std::vector<char> const &vec)
 {
-	if (vec.empty()) return {};
+	if (vec.empty()) return { };
 	return std::string(&vec[0], vec.size());
 }
 
@@ -260,6 +324,8 @@ struct ProcessWin::Private {
 	std::vector<char> stdout_bytes;
 	std::vector<char> stderr_bytes;
 	int exit_code = -1;
+	int error_code = 0;
+	std::string error_message;
 };
 
 ProcessWin::ProcessWin()
@@ -278,6 +344,8 @@ void ProcessWin::start(std::string const &command, bool use_input)
 		wait();
 	}
 	m->exit_code = -1;
+	m->error_code = 0;
+	m->error_message.clear();
 	if (command.empty()) {
 		return;
 	}
@@ -296,6 +364,8 @@ int ProcessWin::wait()
 	m->stdout_bytes.insert(m->stdout_bytes.end(), m->th.outq_.begin(), m->th.outq_.end());
 	m->stderr_bytes.insert(m->stderr_bytes.end(), m->th.errq_.begin(), m->th.errq_.end());
 	m->exit_code = m->th.exit_code_;
+	m->error_code = static_cast<int>(m->th.error_code_);
+	m->error_message = std::move(m->th.error_message_);
 	m->th.reset();
 	return m->exit_code;
 }
@@ -326,6 +396,7 @@ void ProcessWin::_close_input(bool justnow)
 
 void ProcessWin::stop()
 {
+	m->th.terminate();
 	wait();
 }
 
@@ -334,12 +405,22 @@ int ProcessWin::get_exit_code() const
 	return m->exit_code;
 }
 
-const std::vector<char> &ProcessWin::stdout_bytes() const
+int ProcessWin::get_error_code() const
+{
+	return m->error_code;
+}
+
+std::string const &ProcessWin::get_error_message() const
+{
+	return m->error_message;
+}
+
+std::vector<char> const &ProcessWin::stdout_bytes() const
 {
 	return m->stdout_bytes;
 }
 
-const std::vector<char> &ProcessWin::stderr_bytes() const
+std::vector<char> const &ProcessWin::stderr_bytes() const
 {
 	return m->stderr_bytes;
 }

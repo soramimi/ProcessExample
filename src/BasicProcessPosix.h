@@ -2,14 +2,15 @@
 #define BASICPROCESSPOSIX_H
 
 #include "AbstractProcess.h"
-#include <optional>
 #include <climits>
+#include <optional>
 
 class ProcessPosix : public AbstractProcess {
 private:
 	struct Private;
 	Private *m;
 	static void parse_args(std::string const &cmd, std::vector<std::string> *out);
+
 public:
 	ProcessPosix();
 	~ProcessPosix();
@@ -24,17 +25,18 @@ public:
 	std::string const &get_error_message() const;
 	std::vector<char> const &stdout_bytes() const;
 	std::vector<char> const &stderr_bytes() const;
-	
+
 	void close_input(bool justnow);
-	
 };
 
 class ProcessPosixPty : public AbstractPtyProcess {
 private:
 	struct Private;
 	Private *m;
+
 protected:
 	void run();
+
 public:
 	ProcessPosixPty();
 	~ProcessPosixPty() override;
@@ -42,7 +44,7 @@ public:
 	int read_output(char *ptr, int len) override;
 	void write_input(char const *ptr, int len) override;
 	void close_input();
-	void start(const std::string &cmd, const std::string &env, bool use_input) override;
+	void start(std::string const &cmd, std::string const &env, bool use_input) override;
 	int wait() override;
 	void stop() override;
 	int get_exit_code() const override;

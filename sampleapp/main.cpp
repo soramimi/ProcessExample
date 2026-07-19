@@ -1,4 +1,5 @@
 
+#include <algorithm>
 #include <string>
 
 #ifdef _WIN32
@@ -8,6 +9,7 @@
 #include <ProcessConPtyWithWorker.h>
 #include <ProcessWin.h>
 #include <ProcessWinConPty.h>
+#include <ProcessWinPty.h>
 #else
 #include <BasicProcessPosix.h>
 #endif
@@ -161,9 +163,7 @@ int main_basic_posix(int /*argc*/, char ** /*argv*/)
 {
 	std::string cmd = R"("/usr/bin/git")";
 	cmd += " --version";
-	// BasicProcessWin::Options opts;
-	// opts.output_vector = true;
-	ProcessPosix proc;//(opts);
+	ProcessPosix proc;
 	proc.start(cmd, false);
 	proc.wait();
 	auto vec = proc.stdout_bytes();
@@ -177,9 +177,7 @@ int main_basic_posix_pty(int /*argc*/, char ** /*argv*/)
 {
 	std::string cmd = R"("/usr/bin/git")";
 	cmd += " --version";
-	// BasicProcessWin::Options opts;
-	// opts.output_vector = true;
-	ProcessPosixPty proc;//(opts);
+	ProcessPosixPty proc;
 	proc.start(cmd, {}, false);
 	proc.wait();
 	auto vec = proc.stdout_bytes();

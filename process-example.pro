@@ -33,10 +33,3 @@ SOURCES += \
 	sampleapp/misc.cpp \
 	sampleapp/unicode_conversion.cpp
 
-
-PROCESS_SRC += $$PWD/src
-PROCESS_PRI = $$PROCESS_SRC/../process.pri
-INCLUDEPATH += $$PROCESS_SRC
-DISTFILES += $$PROCESS_PRI
-include($$PROCESS_PRI)
-

@@ -1,7 +1,12 @@
 #include "ProcessWinConPty.h"
 
 struct ProcessWinConPty::Private {
-	mutable std::mutex mutex;
+	// state_mutex: started/running/exit_code などの軽い状態と、
+	//   write_input/read_output などの短い操作を保護する。
+	// op_mutex: conpty へのブロッキング呼び出し (wait/stop) を直列化する。
+	//   ロック順序は常に op_mutex -> state_mutex (state_mutex は常に葉)。
+	mutable std::mutex state_mutex;
+	std::mutex op_mutex;
 	BasicProcessWinConPTY conpty;
 	bool started = false;
 	bool running = false;
@@ -22,16 +27,17 @@ ProcessWinConPty::~ProcessWinConPty()
 	delete m;
 }
 
-void ProcessWinConPty::set_options(const BasicProcessWinConPTY::Options &options)
+void ProcessWinConPty::set_options(BasicProcessWinConPTY::Options const &options)
 {
 	m->conpty.set_options(options);
 }
 
-void ProcessWinConPty::start(const std::string &command, const std::string &env, bool use_input)
+void ProcessWinConPty::start(std::string const &command, std::string const &env, bool use_input)
 {
 	(void)env;
 	(void)use_input;
-	std::lock_guard<std::mutex> lock(m->mutex);
+	std::unique_lock<std::mutex> op(m->op_mutex);
+	std::lock_guard<std::mutex> lock(m->state_mutex);
 	if (m->running) {
 		m->conpty.wait();
 		m->running = false;
@@ -58,11 +64,24 @@ void ProcessWinConPty::start(const std::string &command, const std::string &env,
 
 int ProcessWinConPty::wait()
 {
-	std::lock_guard<std::mutex> lock(m->mutex);
-	if (!m->running) {
-		return m->exit_code;
+	// conpty.wait() でブロックしている間は state_mutex を保持しない。
+	// これにより待機中も write_input/read_output/stop が機能する。
+	{
+		std::lock_guard<std::mutex> lock(m->state_mutex);
+		if (!m->running) {
+			return m->exit_code;
+		}
+	}
+	std::unique_lock<std::mutex> op(m->op_mutex);
+	{
+		// op_mutex 取得までの間に stop() が完了している可能性があるため再確認する
+		std::lock_guard<std::mutex> lock(m->state_mutex);
+		if (!m->running) {
+			return m->exit_code;
+		}
 	}
 	auto result = m->conpty.wait();
+	std::lock_guard<std::mutex> lock(m->state_mutex);
 	m->running = false;
 	std::vector<char> const &out = m->conpty.stdout_bytes();
 	stdout_bytes_.assign(out.begin(), out.end());
@@ -73,27 +92,41 @@ int ProcessWinConPty::wait()
 
 void ProcessWinConPty::stop()
 {
-	std::lock_guard<std::mutex> lock(m->mutex);
-	if (m->running) {
-		m->conpty.close_input();
-		m->conpty.wait();
-		m->running = false;
-		std::vector<char> const &out = m->conpty.stdout_bytes();
-		stdout_bytes_.assign(out.begin(), out.end());
-		stderr_bytes_.clear();
-		m->exit_code = m->conpty.get_exit_code();
+	{
+		std::lock_guard<std::mutex> lock(m->state_mutex);
+		if (!m->running) {
+			return;
+		}
 	}
+	// 先に子プロセスを終了させる。別スレッドが wait() でブロックしていても、
+	// これによりその待機が解除される (terminate() は内部で競合対策済み)。
+	m->conpty.terminate();
+	std::unique_lock<std::mutex> op(m->op_mutex);
+	{
+		std::lock_guard<std::mutex> lock(m->state_mutex);
+		if (!m->running) {
+			return;
+		}
+	}
+	m->conpty.close_input();
+	m->conpty.wait();
+	std::lock_guard<std::mutex> lock(m->state_mutex);
+	m->running = false;
+	std::vector<char> const &out = m->conpty.stdout_bytes();
+	stdout_bytes_.assign(out.begin(), out.end());
+	stderr_bytes_.clear();
+	m->exit_code = m->conpty.get_exit_code();
 }
 
 bool ProcessWinConPty::is_running() const
 {
-	std::lock_guard<std::mutex> lock(m->mutex);
+	std::lock_guard<std::mutex> lock(m->state_mutex);
 	return m->running;
 }
 
 int ProcessWinConPty::get_exit_code() const
 {
-	std::lock_guard<std::mutex> lock(m->mutex);
+	std::lock_guard<std::mutex> lock(m->state_mutex);
 	return m->exit_code;
 }
 
@@ -102,7 +135,7 @@ void ProcessWinConPty::write_input(char const *ptr, int len)
 	if (!ptr || len <= 0) {
 		return;
 	}
-	std::lock_guard<std::mutex> lock(m->mutex);
+	std::lock_guard<std::mutex> lock(m->state_mutex);
 	if (m->running) {
 		m->conpty.write_input(ptr, len);
 	}
@@ -113,7 +146,7 @@ int ProcessWinConPty::read_output(char *ptr, int len)
 	if (!ptr || len <= 0) {
 		return 0;
 	}
-	std::lock_guard<std::mutex> lock(m->mutex);
+	std::lock_guard<std::mutex> lock(m->state_mutex);
 	if (m->running) {
 		return m->conpty.read_output(ptr, len);
 	}
@@ -127,6 +160,6 @@ void ProcessWinConPty::set_no_window(bool no_window)
 
 void ProcessWinConPty::close_input()
 {
-	std::lock_guard<std::mutex> lock(m->mutex);
+	std::lock_guard<std::mutex> lock(m->state_mutex);
 	m->conpty.close_input();
 }

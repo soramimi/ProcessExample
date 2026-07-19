@@ -9,8 +9,8 @@
 #include "unicode_conversion.h"
 
 /**
- * コマンドラインから実行ファイル名を抜き取る。
- * 例: "C:\Program Files\MyApp\app.exe" --option -> C:\Program Files\MyApp\app.exe
+ * Windows 同梱の OpenSSH クライアント (C:/Windows/System32/OpenSSH/ssh.exe) を探す。
+ * 見つかればパスを '/' 区切りの UTF-8 文字列で返す。見つからなければ空文字列。
  */
 std::string find_windows_openssh()
 {

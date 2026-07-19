@@ -2,13 +2,13 @@
 #ifdef _WIN32
 #include <windows.h>
 #else
-#include <unistd.h>
 #include <limits.h>
+#include <unistd.h>
 #endif
 
 #include "ProcessHelper.h"
 
-void process::helper::PushDir::chdir(const dir_string_t &dir)
+void process::helper::PushDir::chdir(dir_string_t const &dir)
 {
 #ifdef _WIN32
 	if (!dir.empty()) {
@@ -21,7 +21,7 @@ void process::helper::PushDir::chdir(const dir_string_t &dir)
 #endif
 }
 
-process::helper::PushDir::PushDir(const dir_string_t &dir)
+process::helper::PushDir::PushDir(dir_string_t const &dir)
 {
 	pushd(dir);
 }
@@ -31,7 +31,7 @@ process::helper::PushDir::~PushDir()
 	popd();
 }
 
-void process::helper::PushDir::pushd(const dir_string_t &dir)
+void process::helper::PushDir::pushd(dir_string_t const &dir)
 {
 #ifdef _WIN32
 	wchar_t tmp[MAX_PATH];
@@ -50,5 +50,5 @@ void process::helper::PushDir::pushd(const dir_string_t &dir)
 void process::helper::PushDir::popd()
 {
 	chdir(cwd_);
-	cwd_ = {};
+	cwd_ = { };
 }
