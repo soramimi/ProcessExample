@@ -80,6 +80,7 @@ struct ProcessWinPty::Private {
 	std::thread thread;
 	std::mutex mutex;
 	std::condition_variable cv;
+	bool completed = true;
 	std::string command;
 	std::string env;
 	std::string error_message;
@@ -272,24 +273,41 @@ void ProcessWinPty::start(std::string const &cmdline, std::string const &env, bo
 	m->env = env;
 	m->error_message.clear();
 	m->interrupted = false;
+	{
+		std::lock_guard<std::mutex> lock(m->mutex);
+		m->completed = false;
+	}
 	m->thread = std::thread([&]() {
 		run();
+		{
+			std::lock_guard<std::mutex> lock(m->mutex);
+			m->completed = true;
+		}
+		m->cv.notify_all();
 	});
 }
 
 bool ProcessWinPty::wait(int time)
 {
-	(void)time;
 	if (m->thread.joinable()) {
-		m->thread.join();
-		{
-			std::lock_guard<std::mutex> lock(mutex_);
-			stdout_bytes_ = output_vector_;
+		std::unique_lock<std::mutex> lock(m->mutex);
+		bool done;
+		if (time == INT_MAX) {
+			m->cv.wait(lock, [this]() { return m->completed; });
+			done = true;
+		} else {
+			done = m->cv.wait_for(lock, std::chrono::milliseconds(time), [this]() {
+				return m->completed;
+			});
 		}
+		if (!done) {
+			return false;
+		}
+		lock.unlock();
+		m->thread.join();
 		stderr_bytes_ = { };
-		return static_cast<int>(m->exit_code);
 	}
-	return 127;
+	return true;
 }
 
 void ProcessWinPty::stop()
